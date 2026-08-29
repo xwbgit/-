@@ -43,12 +43,14 @@ class SensitiveInspector(BaseScanner):
         if prov_code not in valid_provs:
             return False
             
-        # 出生年份检查 (1920 - 2024)
+        # 出生年份检查 (1920 - 当前年份)
         try:
+            from datetime import datetime
+            current_year = datetime.now().year
             year = int(id_str[6:10])
             month = int(id_str[10:12])
             day = int(id_str[12:14])
-            if year < 1920 or year > 2024 or month < 1 or month > 12 or day < 1 or day > 31:
+            if year < 1920 or year > current_year or month < 1 or month > 12 or day < 1 or day > 31:
                 return False
         except ValueError:
             return False
@@ -222,10 +224,10 @@ class SensitiveInspector(BaseScanner):
                             # 3. 排除 HTML 属性 ID、CSS 选择器、静态文件引用路径与图片扩展名
                             if any(ext in raw_snippet.lower() for ext in [".css", ".js", ".png", ".jpg", ".svg", ".woff", ".webp", "href=", "src=", "url(", "/static/", "/assets/", "/chunk-", "/mfe_", "id=", "class=", "style=", "<style", "georedirect", "px", "rem", "d=\"m", "viewbox"]):
                                 continue
-                            # 4. 排除前后紧贴路径斜杠、连字符、等号或引号
+                            # 4. 排除前后紧贴路径斜杠、连字符或文件扩展名点 (允许正常 JSON 属性与字符串引号)
                             prev_char = content[match.start() - 1] if match.start() > 0 else " "
                             next_char = content[match.end()] if match.end() < len(content) else " "
-                            if prev_char in ("/", "\\", "-", "_", ".", "=", '"', "'", ":") or next_char in ("/", "\\", "-", "_", ".", "=", '"', "'", ":"):
+                            if prev_char in ("/", "\\", "-", "_", ".") or next_char in ("/", "\\", "-", "_", "."):
                                 continue
 
 

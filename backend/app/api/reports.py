@@ -67,8 +67,12 @@ async def list_audit_logs(limit: int = Query(50, ge=1, le=200)):
 async def get_token_stats():
     """实时统计 Antigravity 智能体项目会话的 Token 累计用量与成本"""
     try:
-        from token_monitor import calculate_session_stats
-        return calculate_session_stats()
+        try:
+            from scripts.token_monitor import calculate_session_stats
+            return calculate_session_stats()
+        except ImportError:
+            from token_monitor import calculate_session_stats
+            return calculate_session_stats()
     except Exception as e:
         return {
             "session_id": "active-session",

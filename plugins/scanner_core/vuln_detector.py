@@ -1631,5 +1631,12 @@ class VulnerabilityDetector(BaseScanner):
     async def run(self, context: ScanContext) -> None:
         self.target_url = context.target_url
         self.auth_domains = context.auth_domains
-        findings = await self.scan_all(context.crawled_pages, crawl_metadata={'api_endpoints': context.api_endpoints, 'static_assets': context.static_assets})
+        crawl_meta = {
+            'api_endpoints': list(context.api_endpoints),
+            'static_assets': list(context.static_assets),
+            'js_scripts': context.js_scripts,
+            'url_parameters': context.url_parameters,
+            'forms': context.forms
+        }
+        findings = await self.scan_all(context.crawled_pages, crawl_metadata=crawl_meta)
         context.add_findings(findings)

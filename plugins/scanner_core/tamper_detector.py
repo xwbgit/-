@@ -29,12 +29,20 @@ class TamperDetector(BaseScanner):
             (r"(?:代开增值税发票|办理假证|枪支弹药购买|迷奸药水|私家侦探定位)", "非法灰黑产违法信息篡改植入", "HIGH", 8.5)
         ]
         
+        # 构建安全域名正则白名单 (支持 *.domain.com 通配符)
+        domain_patterns = []
+        for d in self.auth_domains:
+            clean_d = d.lstrip("*.")
+            if clean_d:
+                domain_patterns.append(r"(?:[a-zA-Z0-9-]+\.)*" + re.escape(clean_d))
+        domain_regex_part = "|".join(domain_patterns) if domain_patterns else r"[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+
         # 恶意外链与挖矿挂马脚本特征
         self.malicious_script_signatures = [
             (r"coinhive\.min\.js|cryptoloot|miner\.start|webassembly.*miner", "网页被植入 Web 挖矿脚本 (Coinhive/CryptoLoot)", "HIGH", 8.0),
             (r"eval\s*\(\s*unescape\s*\(\s*['\"][^'\"]{20,}", "高度混淆的 eval(unescape(...)) 恶意挂马脚本", "HIGH", 8.5),
             (r"document\.write\s*\(\s*unescape\s*\(\s*['\"][^'\"]{20,}", "document.write 动态恶意脚本释放载荷", "HIGH", 8.2),
-            (r"window\.location\.replace\s*\(\s*['\"]https?:\/\/(?!(?:[a-zA-Z0-9-]+\.)*(?:" + "|".join(re.escape(d) for d in self.auth_domains) + r"))", "恶意页面跳转与流量劫持注入", "HIGH", 8.0)
+            (rf"window\.location\.replace\s*\(\s*['\"]https?:\/\/(?!(?:{domain_regex_part}))", "恶意页面跳转与流量劫持注入", "HIGH", 8.0)
         ]
 
     def scan_pages(self, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

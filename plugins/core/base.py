@@ -20,6 +20,9 @@ class ScanContext:
     sub_assets: List[Dict[str, Any]] = field(default_factory=list)
     topology_cluster: Dict[str, Any] = field(default_factory=dict)
     
+    url_parameters: List[Dict[str, Any]] = field(default_factory=list)
+    forms: List[Dict[str, Any]] = field(default_factory=list)
+    
     findings: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
