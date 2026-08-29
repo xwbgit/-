@@ -136,6 +136,23 @@ class InspectionOrchestrator:
                 sub = scanners_dict['SubAssetExpander']()
                 await sub.run(context)
                 self._trace_step("SubAssetExpander", True, "执行授权范围内的被动发现与可达性确认")
+                
+                # 任务5: WHOIS/ASN 增强
+                if 'WhoisEnricher' in scanners_dict:
+                    self._update_task_status("RUNNING", 30, "提取 WHOIS 与 ASN 资产归属情报...")
+                    enricher = scanners_dict['WhoisEnricher']()
+                    await enricher.run(context)
+                    self._trace_step("WhoisEnricher", True, "完成资产 IP 的 WHOIS 归属查询")
+                else:
+                    self._trace_step("WhoisEnricher", False, "插件未加载")
+
+                # 任务2: HTTPS 证书安全审计
+                if 'CertAuditor' in scanners_dict:
+                    cert_auditor = scanners_dict['CertAuditor']()
+                    await cert_auditor.run(context)
+                    self._trace_step("CertAuditor", True, "完成 HTTPS 证书与弱加密套件审计")
+                else:
+                    self._trace_step("CertAuditor", False, "插件未加载")
             else:
                 self._trace_step("SubAssetExpander", False, "插件未加载")
                 
@@ -255,6 +272,7 @@ class InspectionOrchestrator:
             risk_summary["architecture"] = architecture_info
             risk_summary["execution_trace"] = self.execution_trace
             risk_summary["tool_runs"] = context.metadata.get("tool_runs", [])
+            risk_summary["whois_data"] = context.metadata.get("whois_data", {})
             risk_summary["src_filter_stats"] = get_src_stats(all_raw_findings_pre_src, src_eligible_findings)
 
             crawl_results = {
@@ -273,6 +291,12 @@ class InspectionOrchestrator:
                 risk_summary["baseline_diff"] = BaselineService.compare_baselines(snapshots[1]["task_id"], self.task_id)
             else:
                 risk_summary["baseline_diff"] = {"status": "INITIAL_BASELINE", "message": "首次巡检，已建立初始基线"}
+                
+            sub_asset_snapshots = BaselineService.get_latest_sub_asset_snapshots(target_url, limit=2)
+            if len(sub_asset_snapshots) > 1:
+                risk_summary["sub_asset_diff"] = BaselineService.compare_sub_assets(sub_asset_snapshots[1]["task_id"], self.task_id)
+            else:
+                risk_summary["sub_asset_diff"] = {"status": "INITIAL_BASELINE", "message": "首次子资产扫描，已建立初始基线"}
 
             self._update_task_status("RUNNING", 96, "基线对比完成，正在发送风险告警...", summary=risk_summary)
             from backend.app.baseline.alert_service import AlertService
@@ -401,6 +425,19 @@ class InspectionOrchestrator:
             json.dumps(dom_hashes, ensure_ascii=False), findings_hash
         ))
         
+        # 4. 写入子资产快照 (任务3新增)
+        sub_assets = crawl_results.get("sub_assets", [])
+        if sub_assets:
+            sub_asset_snapshot_id = str(uuid.uuid4())
+            port_results = summary.get("port_scan_results", [])
+            cursor.execute("""
+            INSERT INTO sub_asset_snapshots (id, target_url, task_id, snapshot_time, sub_assets_count, sub_assets_json, port_results_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                sub_asset_snapshot_id, self.task_data["target_url"], self.task_id, now,
+                len(sub_assets), json.dumps(sub_assets, ensure_ascii=False), json.dumps(port_results, ensure_ascii=False)
+            ))
+
         conn.commit()
         conn.close()
 

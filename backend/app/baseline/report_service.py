@@ -414,3 +414,184 @@ class ReportService:
                 
         return "\n".join(md_lines)
 
+    @classmethod
+    def generate_mlps_report(cls, task_id: str) -> str:
+        """生成符合国家《等保2.0》与《数据安全法》合规评估的 Markdown 报告"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        task_row = cursor.fetchone()
+        if not task_row:
+            conn.close()
+            raise ValueError(f"Task {task_id} not found")
+        task = dict(task_row)
+        
+        cursor.execute("SELECT * FROM findings WHERE task_id = ? ORDER BY cvss_score DESC", (task_id,))
+        findings = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        
+        md_lines = [
+            f"# 网络安全等级保护 (等保2.0) 与数据安全法合规自查报告",
+            f"",
+            f"**系统名称**: `{task.get('name')}`  ",
+            f"**测试地址**: `{task.get('target_url')}`  ",
+            f"**评估日期**: `{datetime.now().strftime('%Y-%m-%d')}`  ",
+            f"**评估单位**: 安恒星巡 (DAS-SentinelAgent)  ",
+            f"",
+            f"---",
+            f"",
+            f"## 一、 合规性概览",
+            f"本次安全巡检依据 GB/T 22239-2019《信息安全技术 网络安全等级保护基本要求》（等保2.0）及《中华人民共和国数据安全法》要求，对目标系统进行自动化技术测评。共发现 **{len(findings)}** 项潜在不合规风险。",
+            f""
+        ]
+        
+        # 映射发现到等保控制点
+        control_points = {
+            "安全通信网络 - 通信传输 (数据泄露)": [],
+            "安全区域边界 - 访问控制 (越权/身份验证)": [],
+            "安全计算环境 - 入侵防范 (注入漏洞/RCE)": [],
+            "安全计算环境 - 恶意代码防范 (篡改/挂马)": [],
+            "数据安全 - 个人信息保护": []
+        }
+        
+        for f in findings:
+            cat = f.get('category', '').upper()
+            title = f.get('title', '').lower()
+            if "敏感" in title or "sensitive" in title or cat == "SENSITIVE":
+                control_points["数据安全 - 个人信息保护"].append(f)
+            elif "越权" in title or "未授权" in title or "auth" in title:
+                control_points["安全区域边界 - 访问控制 (越权/身份验证)"].append(f)
+            elif "注入" in title or "rce" in title or "vuln" in cat:
+                control_points["安全计算环境 - 入侵防范 (注入漏洞/RCE)"].append(f)
+            elif "篡改" in title or "tamper" in cat:
+                control_points["安全计算环境 - 恶意代码防范 (篡改/挂马)"].append(f)
+            else:
+                control_points["安全通信网络 - 通信传输 (数据泄露)"].append(f)
+                
+        md_lines.append("## 二、 控制点符合性分析")
+        for point, items in control_points.items():
+            if items:
+                md_lines.append(f"\n### {point} ❌ [不符合]")
+                md_lines.append(f"发现 {len(items)} 项风险项：")
+                for i, item in enumerate(items[:5], 1):
+                    md_lines.append(f"- **{item.get('severity')}**: {item.get('title')} (CVSS: {item.get('cvss_score')})")
+                if len(items) > 5:
+                    md_lines.append(f"- *... 以及其他 {len(items) - 5} 项*")
+            else:
+                md_lines.append(f"\n### {point} ✅ [符合]")
+                md_lines.append(f"当前策略未发现明显违规项。")
+                
+        md_lines.extend([
+            f"",
+            f"---",
+            f"## 三、 总体整改建议",
+            f"1. **落实数据加密**：针对“数据安全”与“通信传输”问题，建议落实全链路 HTTPS 及数据落盘加密。",
+            f"2. **身份鉴别收紧**：针对“访问控制”缺失，应强化 API 的 JWT 或 Session 认证，防范越权。",
+            f"3. **边界防护与 WAF**：建议在边界部署 Web 应用防火墙，拦截注入类及 RCE 攻击。",
+            f"",
+            f"> 注：本报告为自动化技术评测辅助结论，正式定级与测评请依据公安部授权测评机构出具的官方报告为准。"
+        ])
+        
+        return "\n".join(md_lines)
+
+    @classmethod
+    def generate_sub_asset_report(cls, task_id: str) -> str:
+        """生成子资产专项安全评估报告 Markdown"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        task_row = cursor.fetchone()
+        if not task_row:
+            conn.close()
+            raise ValueError(f"Task {task_id} not found")
+        task = dict(task_row)
+        
+        cursor.execute("SELECT * FROM sub_asset_snapshots WHERE task_id = ? ORDER BY snapshot_time DESC LIMIT 1", (task_id,))
+        snapshot_row = cursor.fetchone()
+        conn.close()
+        
+        sub_assets = []
+        if snapshot_row:
+            sub_assets = json.loads(dict(snapshot_row).get("sub_assets_json", "[]"))
+            
+        md_lines = [
+            f"# 子资产安全评估专项报告",
+            f"",
+            f"**主任务目标**: `{task.get('target_url')}`  ",
+            f"**巡检任务 ID**: `{task.get('id')}`  ",
+            f"**报告生成时间**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  ",
+            f"",
+            f"---",
+            f"",
+            f"## 1. 资产发现汇总",
+            f"共发现旁站/子资产 **{len(sub_assets)}** 个。",
+            f""
+        ]
+        
+        if not sub_assets:
+            md_lines.append("> 本次巡检未发现关联子资产。")
+            return "\n".join(md_lines)
+            
+        # 统计高危服务和端口
+        high_risk_ports = []
+        ip_clusters = {}
+        for sa in sub_assets:
+            # IP 聚合
+            ips = sa.get("ips", [])
+            for ip in ips:
+                if ip not in ip_clusters:
+                    ip_clusters[ip] = []
+                ip_clusters[ip].append(sa.get("hostname"))
+                
+            # 端口统计
+            for port_info in sa.get("ports", []):
+                if port_info.get("risk_level") in ["HIGH", "CRITICAL"]:
+                    high_risk_ports.append({
+                        "hostname": sa.get("hostname"),
+                        "port": port_info.get("port"),
+                        "service": port_info.get("service"),
+                        "risk": port_info.get("risk_level")
+                    })
+                    
+        # 端口暴露统计表
+        md_lines.extend([
+            "## 2. 核心子资产与端口暴露清单",
+            "",
+            "| 资产域名 | IP 列表 | 开放端口 | 风险等级 |",
+            "|----------|---------|----------|----------|"
+        ])
+        
+        # 排序
+        sub_assets_sorted = sorted(sub_assets, key=lambda x: {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}.get(x.get("risk_level", "INFO"), 0), reverse=True)
+        
+        for sa in sub_assets_sorted:
+            ips_str = ", ".join(sa.get("ips", []))
+            ports = sa.get("ports", [])
+            ports_str = ", ".join([f"{p['port']}({p['service']})" for p in ports]) if ports else "无"
+            risk = sa.get("risk_level", "INFO")
+            md_lines.append(f"| `{sa.get('hostname')}` | {ips_str} | {ports_str} | {risk} |")
+            
+        md_lines.extend([
+            "",
+            "## 3. 高危服务列表",
+            ""
+        ])
+        
+        if high_risk_ports:
+            for hp in high_risk_ports:
+                md_lines.append(f"- **{hp['hostname']}**: 开放了高危端口 `{hp['port']}` (服务: `{hp['service']}`)，风险等级: **{hp['risk']}**")
+        else:
+            md_lines.append("> 未发现高危服务端口暴露。")
+            
+        md_lines.extend([
+            "",
+            "## 4. IP 聚合分析",
+            ""
+        ])
+        for ip, hosts in ip_clusters.items():
+            if len(hosts) > 1:
+                md_lines.append(f"- **IP {ip}** 共承载了 {len(hosts)} 个发现域名: `{', '.join(hosts)}`")
+                
+        return "\n".join(md_lines)

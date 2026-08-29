@@ -342,3 +342,38 @@ class SubAssetExpander(BaseScanner):
         context.sub_assets = res.get("sub_assets", [])
         context.topology_cluster = res.get("topology_cluster", {})
         context.add_findings(res.get("risk_findings", []))
+
+        # --- 任务 1: 子资产递归爬取联动 ---
+        from plugins.scanner_extensions.sub_assets.asset_crawler import AssetCrawler
+        
+        existing_urls = {p.get("url") for p in context.crawled_pages if p.get("url")}
+        
+        for asset in context.sub_assets:
+            if asset.get("visited") and asset.get("ownership_confirmed"):
+                asset_url = asset.get("url")
+                # 避免重复爬取主目标 (主目标在 crawler 自身已深度爬取)
+                if asset_url.rstrip("/") == self.target_url.rstrip("/"):
+                    continue
+                    
+                logger.info(f"Starting secondary crawl for sub-asset: {asset_url}")
+                crawler = AssetCrawler(
+                    base_url=asset_url,
+                    auth_domains=self.auth_domains,
+                    max_depth=2,  # 深度限制 2
+                    max_pages=15, # 页面数限制 15
+                    qps_limit=5.0
+                )
+                
+                try:
+                    crawl_res = await crawler.crawl()
+                    pages = crawl_res.get("pages", [])
+                    
+                    # 合并 crawled_pages 并去重
+                    for p in pages:
+                        url = p.get("url")
+                        if url and url not in existing_urls:
+                            context.crawled_pages.append(p)
+                            existing_urls.add(url)
+                except Exception as e:
+                    logger.debug(f"Secondary crawl failed for {asset_url}: {e}")
+

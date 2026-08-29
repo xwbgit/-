@@ -100,3 +100,76 @@ class BaselineService:
             "retained_findings": retained_findings,
             "risk_trend": risk_trend
         }
+
+    @classmethod
+    def get_latest_sub_asset_snapshots(cls, target_url: str, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sub_asset_snapshots WHERE target_url = ? ORDER BY snapshot_time DESC LIMIT ?", (target_url, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    @classmethod
+    def compare_sub_assets(cls, base_task_id: str, current_task_id: str) -> Dict[str, Any]:
+        """对比两次巡检任务的子资产与端口异动差异"""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM sub_asset_snapshots WHERE task_id = ?", (base_task_id,))
+        base_row = cursor.fetchone()
+        cursor.execute("SELECT * FROM sub_asset_snapshots WHERE task_id = ?", (current_task_id,))
+        curr_row = cursor.fetchone()
+        conn.close()
+        
+        if not base_row or not curr_row:
+            return {"error": "未找到对应的子资产基线快照数据"}
+            
+        base_sub_assets = json.loads(base_row["sub_assets_json"])
+        curr_sub_assets = json.loads(curr_row["sub_assets_json"])
+        
+        base_hosts = {asset["hostname"]: asset for asset in base_sub_assets if "hostname" in asset}
+        curr_hosts = {asset["hostname"]: asset for asset in curr_sub_assets if "hostname" in asset}
+        
+        new_hosts = list(set(curr_hosts.keys()) - set(base_hosts.keys()))
+        removed_hosts = list(set(base_hosts.keys()) - set(curr_hosts.keys()))
+        
+        # 端口异动比对
+        base_ports = json.loads(base_row["port_results_json"]) if "port_results_json" in base_row else []
+        curr_ports = json.loads(curr_row["port_results_json"]) if "port_results_json" in curr_row else []
+        
+        base_host_ports = {}
+        for r in base_ports:
+            base_host_ports[r["hostname"]] = {p["port"] for p in r.get("open_ports", [])}
+            
+        curr_host_ports = {}
+        for r in curr_ports:
+            curr_host_ports[r["hostname"]] = {p["port"] for p in r.get("open_ports", [])}
+            
+        port_changes = []
+        for host in set(base_host_ports.keys()).intersection(set(curr_host_ports.keys())):
+            b_ports = base_host_ports[host]
+            c_ports = curr_host_ports[host]
+            new_ports = list(c_ports - b_ports)
+            closed_ports = list(b_ports - c_ports)
+            if new_ports or closed_ports:
+                port_changes.append({
+                    "hostname": host,
+                    "new_ports": new_ports,
+                    "closed_ports": closed_ports
+                })
+                
+        return {
+            "target_url": curr_row["target_url"],
+            "base_task_id": base_task_id,
+            "current_task_id": current_task_id,
+            "base_time": base_row["snapshot_time"],
+            "current_time": curr_row["snapshot_time"],
+            "new_hosts": [curr_hosts[h] for h in new_hosts],
+            "new_hosts_count": len(new_hosts),
+            "removed_hosts": [base_hosts[h] for h in removed_hosts],
+            "removed_hosts_count": len(removed_hosts),
+            "port_changes": port_changes,
+            "port_changes_count": len(port_changes)
+        }
+

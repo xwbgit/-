@@ -36,8 +36,11 @@ class Settings(BaseSettings):
     # 恒脑安全智能体对接配置
     HENGNAO_PLATFORM_URL: str = "https://gc.das-ai.com"
     HENGNAO_AGENT_ID: str = "agent-das-websec-inspector"
-    # 凭证只能由部署环境注入；仓库不提供可用的演示密钥。
+    # HENGNAO AI / LLM Settings
     HENGNAO_API_KEY: str = os.getenv("HENGNAO_API_KEY", "")
+    HENGNAO_API_BASE: str = "https://api.hengnao.com/v1"
+    FAST_MODEL_NAME: str = "deepseek-chat"
+    DEEP_REASON_MODEL_NAME: str = "deepseek-reasoner"
 
     # MsgBox 开发者工作台为可选集成。未配置时不得自动请求第三方站点，
     # 也不得在接口响应或前端代码中暴露任何内置 Token。

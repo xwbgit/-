@@ -33,6 +33,24 @@ async def get_src_markdown_report(task_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/{task_id}/compliance-markdown", response_class=Response)
+async def get_compliance_markdown_report(task_id: str):
+    """导出符合等保2.0与数据安全法标准的 Markdown 合规自查报告"""
+    try:
+        content = ReportService.generate_mlps_report(task_id)
+        return Response(content=content, media_type="text/markdown; charset=utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{task_id}/sub-assets", response_class=Response)
+async def get_sub_asset_markdown_report(task_id: str):
+    """导出独立的子资产安全评估报告"""
+    try:
+        content = ReportService.generate_sub_asset_report(task_id)
+        return Response(content=content, media_type="text/markdown; charset=utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/{task_id}/json")
 async def get_json_report(task_id: str):

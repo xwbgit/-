@@ -156,3 +156,49 @@ def test_crt_sh_and_wildcard_dns():
         assert "目录遍历" in dirlist_finding["title"]
 
     asyncio.run(_async_test())
+
+
+def test_secondary_crawl_linked():
+    from plugins.core.base import ScanContext
+    import plugins.scanner_extensions.sub_assets.sub_asset_expander as sub_asset_expander
+    from plugins.scanner_extensions.sub_assets.asset_crawler import AssetCrawler
+
+    async def _async_test():
+        expander = SubAssetExpander(
+            target_url="https://example.com",
+            auth_domains=["example.com", "*.example.com"]
+        )
+        
+        async def fake_probe(hostname):
+            return {
+                "hostname": hostname,
+                "url": f"https://{hostname}",
+                "status": 200,
+                "visited": True,
+                "discovery_state": "VISITED",
+                "ownership_confirmed": True
+            }
+
+        with patch.object(expander, "_probe_subdomain_web", side_effect=fake_probe):
+            with patch("plugins.scanner_extensions.sub_assets.asset_crawler.AssetCrawler") as MockCrawler:
+                mock_crawler_instance = AsyncMock()
+                mock_crawler_instance.crawl = AsyncMock(return_value={
+                    "pages": [{"url": "https://api.example.com/v1/users"}]
+                })
+                MockCrawler.return_value = mock_crawler_instance
+                
+                context = ScanContext(task_id="test", target_url="https://example.com", auth_domains=["example.com", "*.example.com"])
+                context.crawled_pages = [{"url": "https://example.com/"}]
+                
+                with patch.object(expander, "passive_extract_from_crawled_content", return_value={"api.example.com"}):
+                    await expander.run(context)
+                
+                assert len(context.crawled_pages) == 2
+                assert context.crawled_pages[1]["url"] == "https://api.example.com/v1/users"
+                MockCrawler.assert_called_once()
+                args, kwargs = MockCrawler.call_args
+                assert kwargs["base_url"] == "https://api.example.com"
+                assert kwargs["max_depth"] == 2
+                assert kwargs["max_pages"] == 15
+
+    asyncio.run(_async_test())

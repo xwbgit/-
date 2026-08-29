@@ -79,13 +79,14 @@ graph TD
 | **2. 后端基座区** | `backend/` | `app/main.py`, `app/api/tasks.py`, `app/agent/orchestrator.py`, `app/models/` | 任务状态机、调度中枢、SQLite 持久化 | 🟢 **ACTIVE / 运行正常** | 实例化 `ScanContext` 并统一驱动扫描全流程 |
 | **3. 插件基座区** | `plugins/core/` | `base.py`, `registry.py`, `scope_manager.py`, `src_filter.py` | 抽象基类、递归自动发现器、SRC 过滤与作用域控制 | 🟢 **ACTIVE / 已全面打通** | 提供 `BaseScanner` 与 `ScanContext` 数据总线 |
 | **4. 核心漏扫区** | `plugins/scanner_core/` | `vuln_detector.py`, `tamper_detector.py`, `sensitive_inspector.py` | 常见高危漏洞(XSS/SQLi/LFI/SSTI/命令注入/SSRF)、防篡改、ISO 7064/Luhn 敏感数据 | 🟢 **ACTIVE / 21 项单测 100% 通过** | 继承 `BaseScanner`，从 `context` 读页面，向 `context` 写 `findings` |
-| **5. 扩展：子资产方向** | `plugins/scanner_extensions/sub_assets/` | `asset_crawler.py`, `sub_asset_expander.py`, `fingerprint_detector.py` | 全站爬虫、子域多源测绘 (crt.sh/字典)、CNAME 悬挂接管、技术栈指纹 | 🟢 **ACTIVE / 深度集成中** | 写入 `context.crawled_pages`, `context.sub_assets`，供漏扫区消费 |
-| **6. 扩展：利用链方向** | `plugins/scanner_extensions/exploit_chain/` | `deep_exploit_engine.py` | 针对 SQLi/LFI/SSTI/BOLA 进行非破坏性利用链深度推演 | 🟢 **ACTIVE / 已接入调度流** | 读取 `context.findings` 消费并回写深化后的证据链 |
+| **5. 扩展：子资产方向** | `plugins/scanner_extensions/sub_assets/` | `asset_crawler.py`, `sub_asset_expander.py`, `fingerprint_detector.py`, `port_scanner.py`, `vuln_scanner.py`, `asset_correlator.py`, `cert_auditor.py`, `whois_enricher.py` | 全站爬虫(含二级递归)、子域多源测绘 (crt.sh/字典)、CNAME 悬挂接管、Top100端口扫描、7类服务漏洞探针、IP/C段风险聚合、HTTPS证书审计、WHOIS测绘 | 🟢 **ACTIVE / 完整闭环** | 写入 `context.crawled_pages`, `context.sub_assets`, `context.metadata`，供漏扫区消费 |
+| **6. 扩展：利用链方向** | `plugins/scanner_extensions/exploit_chain/` | `deep_exploit_engine.py`, `ai_mutator.py` | 针对 SQLi/LFI/SSTI/BOLA 进行非破坏性利用链深度推演，恒脑大模型自适应 Payload 变异 | 🟢 **ACTIVE / 已接入调度流** | 读取 `context.findings` 消费并回写深化后的证据链 |
 | **7. 扩展：链接处理方向** | `plugins/scanner_extensions/link_processor/` | `smart_link_extractor.py` | 动态前端 JS 隐藏路由挖掘与合规外链清洗 | 🟢 **ACTIVE / 标准扩展已就绪** | 提取接口并注入 `context.api_endpoints` |
-| **8. 扩展：API 探针方向** | `plugins/scanner_extensions/api_fuzzer/` | `rest_api_prober.py` | Swagger/OpenAPI/未授权敏感端点探测 | 🟢 **ACTIVE / 标准扩展已就绪** | 读取 `context.api_endpoints` 探测并注入 `context.findings` |
-| **9. 运维与脚本区** | `scripts/` | `multi_scan.py`, `fix_vuln.py`, `check_rules.py` 等 12 个脚本 | 辅助测试与运维工具，保持根目录整洁 | 🟢 **ACTIVE / 归档整洁** | 独立运行的辅助工具 |
-| **10. 测试用例区** | `tests/` | `test_agent_orchestrator.py`, `test_deep_vulnerabilities.py` 等 10 个测试文件 | 自动化集成与回归测试 | 🟢 **100% PASSED (21/21 用例全绿)** | `pytest` 自动化运行 |
-| **11. 知识库区** | `obsidian/` | 7 篇标准双链 Markdown 笔记 (`00` 至 `06`) | 全生命周期文档、架构演进、团队规范 | 🟢 **ACTIVE / 完整交付** | Obsidian 双链知识网络 |
+| **8. 扩展：API 探针方向** | `plugins/scanner_extensions/api_fuzzer/` | `rest_api_prober.py` | Swagger/OpenAPI/Actuator/未授权敏感端点探测与真实绕过验证 | 🟢 **ACTIVE / 标准扩展已就绪** | 读取 `context.api_endpoints` 探测并注入 `context.findings` |
+| **9. 扩展：外部工具与CVE** | `plugins/scanner_extensions/` | `tool_adapters/`, `vulnerability_intel/` | Nuclei/ZAP/Gitleaks 开源工具适配器与 NVD/CPE 离线版本范围匹配 | 🟢 **ACTIVE / 工业级接入** | 外部工具执行与 CVE 情报关联 |
+| **10. 运维与脚本区** | `scripts/` | `multi_scan.py`, `fix_vuln.py`, `check_rules.py` 等 12 个脚本 | 辅助测试与运维工具，保持根目录整洁 | 🟢 **ACTIVE / 归档整洁** | 独立运行的辅助工具 |
+| **11. 测试用例区** | `tests/` | `test_agent_orchestrator.py`, `test_deep_vulnerabilities.py` 等 20+ 个测试文件 | 自动化集成与回归测试 | 🟢 **100% PASSED (70/70 用例全绿, 2 Skipped)** | `pytest` 自动化运行 |
+| **12. 知识库区** | `obsidian/` | 10 篇标准双链 Markdown 笔记 (`00` 至 `09`) | 全生命周期文档、架构演进、团队规范、版本审计 | 🟢 **ACTIVE / 完整交付** | Obsidian 双链知识网络 |
 
 ---
 

@@ -70,15 +70,21 @@ graph TD
 ```text
 plugins/scanner_extensions/
 ├── sub_assets/          # [状态: ACTIVE / 已验证] 方向 1：资产拓扑与子域名测绘方向
-│   ├── asset_crawler.py        -> 异步全站页面与资源爬虫
+│   ├── asset_crawler.py        -> 异步全站页面与资源爬虫 (含二级递归联动)
 │   ├── sub_asset_expander.py   -> 多源子域拓扑与 CNAME 接管检测
-│   └── fingerprint_detector.py -> 技术栈架构拓扑指纹识别
+│   ├── fingerprint_detector.py -> 技术栈架构拓扑指纹识别
+│   ├── port_scanner.py         -> 异步 TCP Connect 扫描 (Top 100 端口) + Banner 抓取
+│   ├── vuln_scanner.py         -> Redis/MongoDB/Docker/Actuator/FTP 服务级漏洞探针
+│   ├── asset_correlator.py     -> IP 聚合、C 段关联、多维加权风险评分
+│   ├── cert_auditor.py         -> HTTPS 证书过期/弱加密套件/弱 TLS 协议审计
+│   └── whois_enricher.py       -> WHOIS/ASN/地理位置与网络运营商情报测绘
 ├── exploit_chain/       # [状态: ACTIVE / 已验证] 方向 2：漏洞利用链与深度渗透方向
-│   └── deep_exploit_engine.py  -> SQLi/LFI/SSTI/BOLA 专项深化推演
+│   ├── deep_exploit_engine.py  -> SQLi/LFI/SSTI/BOLA 专项深化推演
+│   └── ai_mutator.py           -> 恒脑大模型自适应 Payload 变异与 WAF 绕过
 ├── link_processor/      # [状态: ACTIVE / 已验证] 方向 3：特殊链接与外链清洗方向
 │   └── smart_link_extractor.py -> 动态 JS 路由提取与合规外链清洗
 └── api_fuzzer/          # [状态: ACTIVE / 已验证] 方向 4：API 接口挖掘与模糊探测方向
-    └── rest_api_prober.py      -> Swagger/OpenAPI/未授权接口安全探针
+    └── rest_api_prober.py      -> Swagger/OpenAPI/Actuator 接口探针与真实绕过验证
 ```
 
 ---

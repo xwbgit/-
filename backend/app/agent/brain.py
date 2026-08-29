@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
 
+from backend.app.config import settings
 from backend.app.database import get_db_connection
 from backend.app.agent.orchestrator import InspectionOrchestrator
 from plugins.scanner_core.tamper_detector import TamperDetector
@@ -14,6 +15,37 @@ logger = logging.getLogger("das_sentinel.brain")
 
 class AgentBrain:
     """DAS 智能体大脑：支持离线智能意图理解、数据库自主查询与多场景安全编排调度"""
+    
+    @classmethod
+    async def _call_llm(cls, prompt: str, model_type: str = "fast") -> str:
+        """根据 model_type (fast | deep) 调用混合推理模型"""
+        api_key = settings.HENGNAO_API_KEY
+        if not api_key:
+            return ""
+        
+        try:
+            import aiohttp
+            model_name = settings.FAST_MODEL_NAME if model_type == "fast" else settings.DEEP_REASON_MODEL_NAME
+            base_url = settings.HENGNAO_API_BASE.rstrip("/")
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1 if model_type == "fast" else 0.7
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=20) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data["choices"][0]["message"]["content"]
+            return ""
+        except Exception as e:
+            logger.error(f"[AgentBrain] LLM 调用异常: {e}")
+            return ""
 
     @classmethod
     async def chat_and_plan(cls, user_prompt: str, session_id: Optional[str] = None) -> Dict[str, Any]:

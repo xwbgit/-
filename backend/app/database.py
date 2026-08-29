@@ -123,6 +123,19 @@ def init_db():
     )
     """)
     
+    # 7. 子资产快照表 (Sub-Asset Snapshots) - 任务3新增
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sub_asset_snapshots (
+        id TEXT PRIMARY KEY,
+        target_url TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        snapshot_time TEXT NOT NULL,
+        sub_assets_count INTEGER DEFAULT 0,
+        sub_assets_json TEXT NOT NULL,       -- JSON: 子资产列表
+        port_results_json TEXT NOT NULL      -- JSON: 端口扫描结果
+    )
+    """)
+    
     conn.commit()
     
     # 插入默认内置敏感信息规则

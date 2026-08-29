@@ -1658,6 +1658,7 @@ function renderBurpScannerLayout(data) {
         <!-- Burp Scanner 视图主导航选项卡 -->
         <div class="burp-nav-tabs">
             <button class="burp-tab-btn ${currentBurpSubTab === 'sitemap' ? 'active' : ''}" onclick="switchBurpSubTab('sitemap')">🏛️ 网站架构与拓扑实例图 (连线与漏洞标红)</button>
+            <button class="burp-tab-btn ${currentBurpSubTab === 'sub_assets' ? 'active' : ''}" onclick="switchBurpSubTab('sub_assets')">🌐 子资产与端口拓扑 (${(task.summary?.sub_assets || []).length})</button>
             <button class="burp-tab-btn ${currentBurpSubTab === 'issues' ? 'active' : ''}" onclick="switchBurpSubTab('issues')">🐞 查出的安全隐患清单 (${displayFindings.length})</button>
             <button class="burp-tab-btn ${currentBurpSubTab === 'logger' ? 'active' : ''}" onclick="switchBurpSubTab('logger')">📜 发送的探测记录与报文 (${logs.length})</button>
         </div>
@@ -1764,6 +1765,96 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             </div>
         </div>
         `;
+
+    } else if (currentBurpSubTab === 'sub_assets') {
+        const subAssets = task.summary?.sub_assets || [];
+        const whoisData = task.summary?.whois_data || {};
+        if (subAssets.length === 0) {
+            return `
+            <div class="card" style="padding:40px; text-align:center;">
+                <div style="font-size:40px; margin-bottom:10px;">🌐</div>
+                <h3 style="color:#0284c7; font-size:18px;">本次巡检未发现关联子资产或旁站</h3>
+                <p style="color:#64748b; font-size:13px; margin-top:4px;">可能是目标配置了严格的访问限制，或未开启子资产探测模块。</p>
+            </div>`;
+        }
+
+        let html = `
+        <div class="card" style="overflow:auto; max-height: 800px;">
+            <div class="card-title"><span>🌐 主域名 ➔ 旁站/子域 ➔ 开放端口与服务</span></div>
+            <div style="display:flex; flex-direction:column; gap:20px; padding: 20px;">
+        `;
+        
+        const mainDomain = task.target_url;
+        
+        // 分组按 IP 聚类展示
+        const ipGroups = {};
+        subAssets.forEach(sa => {
+            const ips = sa.ips && sa.ips.length > 0 ? sa.ips.join(', ') : '未知 IP';
+            if (!ipGroups[ips]) ipGroups[ips] = [];
+            ipGroups[ips].push(sa);
+        });
+
+        Object.keys(ipGroups).forEach(ip => {
+            let whoisHtml = '';
+            // For displaying WHOIS we'll just check the first IP in the string (if it's a comma separated list)
+            const firstIp = ip.split(',')[0].trim();
+            if (whoisData[firstIp]) {
+                const w = whoisData[firstIp];
+                whoisHtml = `
+                <div style="font-size:11px; color:#64748b; margin-top:4px;">
+                    🌍 归属: <strong>${escapeHtml(w.location)}</strong> | 🏢 组织: <strong>${escapeHtml(w.org)}</strong> | 🌐 ASN: <strong>${escapeHtml(w.asn)}</strong>
+                </div>
+                `;
+            }
+            
+            html += `
+            <div style="border:1px solid #e2e8f0; border-radius:8px; padding:16px; background:#f8fafc;">
+                <div style="font-size:14px; font-weight:700; color:#0f172a; margin-bottom:4px; display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:18px;">🖥️</span> 服务器节点 IP: <code style="color:#0284c7; background:#e0f2fe; padding:2px 6px; border-radius:4px;">${escapeHtml(ip)}</code>
+                </div>
+                ${whoisHtml}
+                <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px; margin-left: 24px; border-left: 2px dashed #cbd5e1; padding-left: 20px;">
+            `;
+            
+            ipGroups[ip].forEach(sa => {
+                let portsHtml = '';
+                if (sa.ports && sa.ports.length > 0) {
+                    sa.ports.forEach(p => {
+                        const riskColor = p.risk_level === 'CRITICAL' || p.risk_level === 'HIGH' ? '#dc2626' : (p.risk_level === 'MEDIUM' ? '#d97706' : '#16a34a');
+                        portsHtml += `<span class="tag" style="background:#fff; border-color:${riskColor}; color:${riskColor}; font-size:11px;">🔌 ${p.port} (${p.service})</span>`;
+                    });
+                } else {
+                    portsHtml = `<span style="font-size:11px; color:#94a3b8;">未探测到开放端口</span>`;
+                }
+
+                html += `
+                <div style="background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:12px; box-shadow:0 1px 2px rgba(0,0,0,0.05);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <div>
+                            <span style="font-size:14px; font-weight:600; color:#1e293b;">${escapeHtml(sa.hostname)}</span>
+                            <span class="tag tag-low" style="font-size:10px; margin-left:6px;">${escapeHtml(sa.category || '子资产')}</span>
+                        </div>
+                        <span class="tag ${sa.risk_level === 'HIGH' || sa.risk_level === 'CRITICAL' ? 'tag-critical' : 'tag-info'}" style="font-size:10px;">
+                            ${escapeHtml(sa.risk_level || 'INFO')}
+                        </span>
+                    </div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
+                        ${portsHtml}
+                    </div>
+                </div>
+                `;
+            });
+            
+            html += `
+                </div>
+            </div>
+            `;
+        });
+
+        html += `
+            </div>
+        </div>`;
+        return html;
 
     } else if (currentBurpSubTab === 'sitemap') {
         // 1. 根据后端保存的响应指纹生成观测拓扑；不按域名猜测内部组件。
@@ -3364,6 +3455,15 @@ async function showEvidence(id) {
         `;
     }
 
+    window._dualPaneCache = window._dualPaneCache || {};
+    const hasDualPane = !!(evidence.raw_request || (deep && deep.raw_request));
+    if (hasDualPane) {
+        window._dualPaneCache[id] = {
+            req: evidence.raw_request || deep.raw_request,
+            res: evidence.raw_response || deep.raw_response
+        };
+    }
+
     let bodyHtml = `
     <p><strong>📍 出现问题的网址：</strong> <code style="color:#0284c7;">${escapeHtml(f.url)}</code></p>
     <p style="margin-top:6px;"><strong>⚠️ 危害与风险说明：</strong> ${escapeHtml(f.impact)}</p>
@@ -3371,7 +3471,10 @@ async function showEvidence(id) {
     ${deepAuditHtml}
 
     <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px; margin:14px 0;">
-        <strong style="color:#0284c7;">🔍 现场抓到的证据 (Evidence Snapshot):</strong>
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong style="color:#0284c7;">🔍 现场抓到的证据 (Evidence Snapshot):</strong>
+            ${hasDualPane ? `<button class="btn btn-primary" style="padding:4px 8px; font-size:12px;" onclick="showDualPaneModalById(${safeInlineArg(id)})">⚖️ 打开双窗高亮比对控制台</button>` : ''}
+        </div>
         <pre style="color:#0f172a; font-family:monospace; margin-top:8px; white-space:pre-wrap; word-break:break-all; font-size:12px;">${escapeHtml(evidence.matched_snippet || JSON.stringify(evidence, null, 2))}</pre>
     </div>
 
