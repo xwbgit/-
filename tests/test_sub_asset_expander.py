@@ -97,7 +97,18 @@ def test_sub_asset_expander_end_to_end_mock():
             {"html_content": 'API Gateway at https://api.example.com', "headers": {}}
         ]
         
-        results = await expander.expand_and_probe_all(pages_data=pages)
+        async def fake_probe(hostname):
+            return {
+                "hostname": hostname,
+                "url": f"https://{hostname}",
+                "status": 200,
+                "visited": True,
+                "discovery_state": "VISITED",
+                "ownership_confirmed": True
+            }
+
+        with patch.object(expander, "_probe_subdomain_web", side_effect=fake_probe):
+            results = await expander.expand_and_probe_all(pages_data=pages)
         
         assert results["root_domain"] == "example.com"
         assert results["active_sub_assets_count"] >= 1

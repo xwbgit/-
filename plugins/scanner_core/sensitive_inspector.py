@@ -263,6 +263,8 @@ class SensitiveInspector(BaseScanner):
                 if kw in text_content:
                     idx = text_content.find(kw)
                     snippet = text_content[max(0, idx-30):min(len(text_content), idx+len(kw)+30)].strip()
+                    masked_kw = self.mask_sensitive_value(kw, "KEYWORD")
+                    masked_snippet = snippet.replace(kw, masked_kw)
                     findings.append({
                         "id": str(uuid.uuid4()),
                         "category": "SENSITIVE",
@@ -271,8 +273,8 @@ class SensitiveInspector(BaseScanner):
                         "url": url,
                         "param": f"Keyword: {kw}",
                         "evidence": {
-                            "matched_snippet": f"... {snippet} ...",
-                            "matched_value_masked": kw
+                            "matched_snippet": f"... {masked_snippet} ...",
+                            "matched_value_masked": masked_kw
                         },
                         "impact": f"检测到包含本单位重要敏感标识或保密关键词【{kw}】的内容被公开发布",
                         "remediation": "核查该页面发布审批流程，删除或替换敏感业务关键词",

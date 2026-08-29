@@ -3,7 +3,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from urllib.parse import urljoin, urlparse, urldefrag, parse_qs
+from urllib.parse import urljoin, urlparse, urlunparse, urldefrag, parse_qs
 from typing import Set, List, Dict, Any, Optional
 import aiohttp
 from bs4 import BeautifulSoup
@@ -51,6 +51,8 @@ class AssetCrawler(BaseScanner):
             parsed = urlparse(url)
             if not parsed.scheme or parsed.scheme not in ('http', 'https'):
                 return False
+            if parsed.username or parsed.password:
+                return False
             host = parsed.netloc.split(':')[0].lower()
             for auth in self.auth_domains:
                 if host == auth or host.endswith("." + auth):
@@ -61,7 +63,21 @@ class AssetCrawler(BaseScanner):
 
     def clean_url(self, url: str) -> str:
         url, _ = urldefrag(url)
-        return url.strip()
+        url = url.strip()
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                return urlunparse((
+                    parsed.scheme.lower(),
+                    parsed.netloc.lower(),
+                    parsed.path or "/",
+                    "",
+                    parsed.query,
+                    ""
+                ))
+        except Exception:
+            pass
+        return url
 
     def _get_url_structure(self, url: str) -> str:
         """获取归一化的 URL 结构 (例如将 /page?id=123 转化为 /page?id=TYPE_INT) 防止参数轰炸导致无限遍历"""
@@ -93,6 +109,15 @@ class AssetCrawler(BaseScanner):
         except Exception:
             pass
 
+    @staticmethod
+    async def _read_response_text(response: aiohttp.ClientResponse, max_bytes: int) -> tuple[str, bool]:
+        """限制单个响应进入内存的大小，避免巡检被异常大文件拖垮。"""
+        raw = await response.content.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        return raw.decode(response.charset or "utf-8", errors="replace"), truncated
+
     async def _fetch_robots_and_sitemap(self, session: aiohttp.ClientSession, queue: List[tuple]):
         """探测 robots.txt 与 sitemap.xml 提取隐藏路由与管理员路径"""
         parsed = urlparse(self.base_url)
@@ -102,7 +127,7 @@ class AssetCrawler(BaseScanner):
         robots_url = urljoin(root_url, "/robots.txt")
         try:
             async with session.get(robots_url, allow_redirects=True) as resp:
-                if resp.status == 200:
+                if resp.status == 200 and self.is_authorized(str(resp.url)):
                     text = await resp.text(errors="replace")
                     for line in text.splitlines():
                         line = line.strip()
@@ -123,7 +148,7 @@ class AssetCrawler(BaseScanner):
             sitemap_url = urljoin(root_url, sitemap_path)
             try:
                 async with session.get(sitemap_url, allow_redirects=True) as resp:
-                    if resp.status == 200:
+                    if resp.status == 200 and self.is_authorized(str(resp.url)):
                         text = await resp.text(errors="replace")
                         locs = re.findall(r"<loc>(.*?)</loc>", text, re.IGNORECASE)
                         for loc in locs[:30]:
@@ -163,10 +188,11 @@ class AssetCrawler(BaseScanner):
 
     async def crawl(self, progress_callback=None) -> Dict[str, Any]:
         """执行异步广度优先（BFS）网站页面与资源发现"""
-        queue = [(self.base_url, 1)]
-        self.visited_urls.add(self.clean_url(self.base_url))
-        self.visited_url_structures.add(self._get_url_structure(self.base_url))
-        self._extract_url_params(self.base_url)
+        normalized_base_url = self.clean_url(self.base_url)
+        queue = [(normalized_base_url, 1)]
+        self.visited_urls.add(normalized_base_url)
+        self.visited_url_structures.add(self._get_url_structure(normalized_base_url))
+        self._extract_url_params(normalized_base_url)
         
         headers = {
             "User-Agent": settings.DEFAULT_USER_AGENT,
@@ -175,7 +201,9 @@ class AssetCrawler(BaseScanner):
         }
         
         connector = aiohttp.TCPConnector(ssl=False, limit=settings.DEFAULT_CONCURRENCY)
-        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=self.timeout, trust_env=True) as session:
+        # 授权目标必须直连；继承系统代理会把本地/内网靶场错误地转发到公网代理，
+        # 既破坏授权边界，也会导致 502 后被误判为“无页面”。
+        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=self.timeout, trust_env=False) as session:
             # 优先从 robots.txt / sitemap.xml 注入初始发现
             await self._fetch_robots_and_sitemap(session, queue)
 
@@ -188,6 +216,11 @@ class AssetCrawler(BaseScanner):
                 try:
                     logger.info(f"Crawling [Depth {depth}]: {current_url}")
                     async with session.get(current_url, allow_redirects=True) as resp:
+                        final_url = self.clean_url(str(resp.url))
+                        if not self.is_authorized(final_url):
+                            # 不把跨域重定向内容带入授权巡检结果。
+                            self.external_links.add(final_url)
+                            continue
                         content_type = resp.headers.get("Content-Type", "")
                         status_code = resp.status
                         
@@ -197,7 +230,7 @@ class AssetCrawler(BaseScanner):
                         
                         # 仅抓取 HTML/文本或 JSON
                         if "text/html" in content_type or "application/xhtml+xml" in content_type:
-                            html_text = await resp.text(errors="replace")
+                            html_text, content_truncated = await self._read_response_text(resp, 5 * 1024 * 1024)
                             soup = BeautifulSoup(html_text, "html.parser")
                             
                             # 计算内容与 DOM 指纹 Hash
@@ -216,7 +249,8 @@ class AssetCrawler(BaseScanner):
                                 "dom_hash": dom_hash,
                                 "headers": resp_headers,
                                 "cookies": raw_cookies,
-                                "depth": depth
+                                "depth": depth,
+                                "content_truncated": content_truncated
                             }
                             self.pages_data.append(page_record)
                             
@@ -241,6 +275,23 @@ class AssetCrawler(BaseScanner):
 
                             # 发现子链接与资源
                             if depth < self.max_depth and len(self.pages_data) < self.max_pages:
+                                # 一些站点会在 HTML 注释中留下调试入口或发布遗留路径。
+                                # 仅接受站内相对路径，仍经过授权域、结构去重和深度限制。
+                                comment_routes = re.findall(
+                                    r"<!--\s*(/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{1,160})\s*-->",
+                                    html_text,
+                                    re.IGNORECASE,
+                                )
+                                for comment_route in comment_routes:
+                                    hinted_url = self.clean_url(urljoin(str(resp.url), comment_route))
+                                    if not self.is_authorized(hinted_url):
+                                        continue
+                                    hinted_struct = self._get_url_structure(hinted_url)
+                                    if hinted_struct not in self.visited_url_structures:
+                                        self.visited_urls.add(hinted_url)
+                                        self.visited_url_structures.add(hinted_struct)
+                                        queue.append((hinted_url, depth + 1))
+
                                 # a 标签超链接
                                 for a_tag in soup.find_all("a", href=True):
                                     raw_href = a_tag["href"]
@@ -267,8 +318,8 @@ class AssetCrawler(BaseScanner):
                                                 if self.is_authorized(res_url) and len(self.js_scripts_data) < 25:
                                                     try:
                                                         async with session.get(res_url, timeout=aiohttp.ClientTimeout(total=5.0)) as js_resp:
-                                                            if js_resp.status == 200:
-                                                                js_text = await js_resp.text(errors="replace")
+                                                            if js_resp.status == 200 and self.is_authorized(str(js_resp.url)):
+                                                                js_text, _ = await self._read_response_text(js_resp, 2 * 1024 * 1024)
                                                                 self.js_scripts_data.append({"url": res_url, "content": js_text})
                                                                 # 自动提取 Webpack / Axios / Fetch / vue-router 中的 API 路由 (增强正则)
                                                                 api_patterns = [
@@ -299,7 +350,7 @@ class AssetCrawler(BaseScanner):
 
 
                         elif "application/json" in content_type or "text/plain" in content_type:
-                            body_text = await resp.text(errors="replace")
+                            body_text, content_truncated = await self._read_response_text(resp, 2 * 1024 * 1024)
                             dom_hash = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
                             self.pages_data.append({
                                 "url": str(resp.url),
@@ -310,7 +361,8 @@ class AssetCrawler(BaseScanner):
                                 "dom_hash": dom_hash,
                                 "headers": resp_headers,
                                 "cookies": raw_cookies,
-                                "depth": depth
+                                "depth": depth,
+                                "content_truncated": content_truncated
                             })
                             self.api_endpoints.add(str(resp.url))
 

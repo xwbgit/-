@@ -14,9 +14,9 @@ from backend.app.config import settings
 logger = logging.getLogger("das_sentinel.vuln")
 
 try:
-    from plugins.core.src_filter import apply_src_filter
+    from plugins.core.src_filter import is_src_noise
 except ImportError:
-    def apply_src_filter(findings): return findings  # fallback
+    def is_src_noise(finding): return False  # fallback
 
 class VulnerabilityDetector(BaseScanner):
     """全面 Web 常见漏洞、弱配置、接口暴露与主动参数风险检测引擎 (带智能抗误报基线)"""
@@ -46,6 +46,9 @@ class VulnerabilityDetector(BaseScanner):
         target_probe = urljoin(self.target_url + "/", random_path_1.lstrip("/"))
         try:
             async with session.get(target_probe, allow_redirects=True) as resp:
+                final_host = (urlparse(str(resp.url)).hostname or "").lower()
+                if not any(final_host == domain or final_host.endswith("." + domain.lstrip("*.")) for domain in self.auth_domains):
+                    return
                 if resp.status == 200:
                     text = await resp.text(errors="replace")
                     # 如果不存在的随机路径返回 200 并且是 HTML，说明是 SPA 前端路由或自定义 200 错误页
@@ -81,7 +84,7 @@ class VulnerabilityDetector(BaseScanner):
         url_parameters = crawl_meta.get("url_parameters", [])
         forms = crawl_meta.get("forms", [])
 
-        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=timeout, trust_env=True) as session:
+        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=timeout, trust_env=False) as session:
             # 0. 建立 404 抗误报基线
             await self._detect_soft404_baseline(session)
 
@@ -149,9 +152,14 @@ class VulnerabilityDetector(BaseScanner):
             for f in findings:
                 f["exploit_chain"] = self.construct_exploit_chain(f)
 
-        # ── 最终 SRC 边界过滤：移除所有不达 SRC 认定标准的 INFO 噪音 ──────────────
-        findings = apply_src_filter(findings)
-        logger.info(f"[VulnDetector] SRC-filtered findings count: {len(findings)}")
+        # 弱配置与信息项仍属于赛题检测结果；这里只标注 SRC 资格，不删除证据。
+        for finding in findings:
+            finding["src_eligible"] = not is_src_noise(finding)
+        logger.info(
+            "[VulnDetector] findings=%s, SRC-eligible=%s",
+            len(findings),
+            sum(1 for finding in findings if finding["src_eligible"])
+        )
         return findings
 
     def _check_security_headers(self, page_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -212,7 +220,7 @@ class VulnerabilityDetector(BaseScanner):
         findings = []
         try:
             # 测试 TRACE 请求
-            async with session.request("TRACE", url, headers={"X-Test-Trace": "DAS-Sentinel-Header"}) as resp:
+            async with session.request("TRACE", url, headers={"X-Test-Trace": "DAS-Sentinel-Header"}, allow_redirects=False) as resp:
                 if resp.status == 200:
                     text = await resp.text(errors="replace")
                     if "DAS-Sentinel-Header" in text or "X-Test-Trace" in text:
@@ -373,7 +381,7 @@ class VulnerabilityDetector(BaseScanner):
             for test_origin in evil_origins:
                 try:
                     req_headers = {"Origin": test_origin}
-                    async with session.get(test_url, headers=req_headers,
+                    async with session.get(test_url, headers=req_headers, allow_redirects=False,
                                            timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
                         acao = resp.headers.get("Access-Control-Allow-Origin", "")
                         acac = resp.headers.get("Access-Control-Allow-Credentials", "").lower()
@@ -593,6 +601,25 @@ class VulnerabilityDetector(BaseScanner):
                 "validate": lambda txt, ctype, st: st == 200 and not ("<html" in txt.lower() or "<!doctype" in txt.lower()) and "svn:" in txt
             },
             {
+                "path": "/src",
+                "title": "应用源代码文件未授权暴露 (/src)",
+                "severity": "HIGH",
+                "cvss": 7.5,
+                "impact": "攻击者可读取服务端源代码，进一步分析路由、鉴权逻辑、依赖版本与敏感配置处理方式。",
+                "source_code": True,
+                "source_signatures": [
+                    r"\bfrom\s+[a-zA-Z_][\w.]*\s+import\b",
+                    r"\bimport\s+[a-zA-Z_][\w.]*",
+                    r"@\w+\.route\s*\(",
+                    r"\bclass\s+\w+[\s(:]",
+                    r"\bdef\s+\w+\s*\(",
+                    r"<\?php\b",
+                    r"\b(?:const|let|var)\s+\w+\s*=",
+                    r"\b(?:require|module\.exports)\s*[=(]"
+                ],
+                "validate": lambda txt, ctype, st: st == 200 and not ("<html" in txt.lower() or "<!doctype" in txt.lower()) and len(txt) >= 80
+            },
+            {
                 "path": "/api/v1/users",
                 "title": "API 未授权访问 (用户列表 /api/v1/users)",
                 "severity": "HIGH",
@@ -629,6 +656,15 @@ class VulnerabilityDetector(BaseScanner):
                     # 首先过滤 SPA 通配符误报
                     if self._is_false_positive_spa_response(text_sample, status):
                         continue
+
+                    source_matches = []
+                    if probe.get("source_code"):
+                        source_matches = [
+                            signature for signature in probe.get("source_signatures", [])
+                            if re.search(signature, text_sample, re.IGNORECASE)
+                        ]
+                        if not source_matches:
+                            continue
                         
                     # 执行严格内容结构特征验证
                     if probe["validate"](text_sample, ctype, status):
@@ -643,7 +679,8 @@ class VulnerabilityDetector(BaseScanner):
                             "evidence": {
                                 "matched_snippet": snippet[:180] + ("..." if len(snippet) > 180 else ""),
                                 "response_status": status,
-                                "response_headers": dict(resp.headers)
+                                "response_headers": dict(resp.headers),
+                                **({"source_signatures": source_matches} if source_matches else {})
                             },
                             "impact": probe["impact"],
                             "remediation": f"立即在 Web 服务器配置中禁止外网访问 {probe['path']}，设置 403 拒绝访问并移除敏感文件",
@@ -669,7 +706,7 @@ class VulnerabilityDetector(BaseScanner):
             for suffix in sensitive_suffixes:
                 target_url = ep.rstrip("/") + suffix
                 try:
-                    async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
+                    async with session.get(target_url, timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as resp:
                         if resp.status == 200:
                             text = await resp.text()
                             text_lower = text.lower()
@@ -761,7 +798,7 @@ class VulnerabilityDetector(BaseScanner):
                 # 阶段 1: 发送特征 Canary，分析反射上下文与过滤矩阵
                 canary_probe = 'das7<xss"\'/\\>'
                 test_url = f"{url}?{param}={canary_probe}" if req_type == "GET" else url
-                async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as xss_resp:
+                async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as xss_resp:
                     if xss_resp.status == 200:
                         body = await xss_resp.text(errors="replace")
                         # 排除 SPA 统一错误页与页面中由于 URL 埋点/JS 变量导致的单纯文本反射
@@ -836,7 +873,7 @@ class VulnerabilityDetector(BaseScanner):
                     (r"Unclosed quotation mark before the character string", "SQL Server 未闭合引号")
                 ]
                 test_url = f"{url}?{param}=1'"
-                async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as sql_resp:
+                async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as sql_resp:
                     body = await sql_resp.text(errors="replace")
                     for pat, desc in sql_error_patterns:
                         if re.search(pat, body, re.IGNORECASE):
@@ -863,11 +900,11 @@ class VulnerabilityDetector(BaseScanner):
                 # 阶段 2: 布尔差分推演 (True: ' AND 4821=4821 -- vs False: ' AND 4821=4822 --)
                 true_url = f"{url}?{param}=1%27%20AND%204821=4821%20--%20"
                 false_url = f"{url}?{param}=1%27%20AND%204821=4822%20--%20"
-                async with session.get(true_url, timeout=aiohttp.ClientTimeout(total=5.0)) as true_resp:
+                async with session.get(true_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as true_resp:
                     true_status = true_resp.status
                     true_text = await true_resp.text(errors="replace")
                     
-                async with session.get(false_url, timeout=aiohttp.ClientTimeout(total=5.0)) as false_resp:
+                async with session.get(false_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as false_resp:
                     false_status = false_resp.status
                     false_text = await false_resp.text(errors="replace")
                     
@@ -899,7 +936,7 @@ class VulnerabilityDetector(BaseScanner):
                 try:
                     # 1. 测量正常基线响应耗时
                     t_base_start = pytime.time()
-                    async with session.get(f"{url}?{param}=1", timeout=aiohttp.ClientTimeout(total=4.0)) as base_resp:
+                    async with session.get(f"{url}?{param}=1", timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as base_resp:
                         await base_resp.text(errors="replace")
                     t_base = pytime.time() - t_base_start
 
@@ -907,14 +944,14 @@ class VulnerabilityDetector(BaseScanner):
                     if t_base < 1.5:
                         time_probe_url = f"{url}?{param}=1%20AND%20SLEEP(2)"
                         t_start = pytime.time()
-                        async with session.get(time_probe_url, timeout=aiohttp.ClientTimeout(total=6.0)) as time_resp:
+                        async with session.get(time_probe_url, timeout=aiohttp.ClientTimeout(total=6.0), allow_redirects=False) as time_resp:
                             await time_resp.text(errors="replace")
                             duration = pytime.time() - t_start
                             # 3. 差分判定：延迟必须显著大于基线且满足延时特征 (delta >= 1.7s)
                             if (duration - t_base) >= 1.7:
                                 # 4. 二次复验：使用 SLEEP(0) 确认耗时回落至基线水准
                                 t_zero_start = pytime.time()
-                                async with session.get(f"{url}?{param}=1%20AND%20SLEEP(0)", timeout=aiohttp.ClientTimeout(total=4.0)) as zero_resp:
+                                async with session.get(f"{url}?{param}=1%20AND%20SLEEP(0)", timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as zero_resp:
                                     await zero_resp.text(errors="replace")
                                     t_zero = pytime.time() - t_zero_start
                                 if t_zero < 1.5:
@@ -955,7 +992,7 @@ class VulnerabilityDetector(BaseScanner):
             for lfi_payload, verify_regex, desc in lfi_vectors:
                 try:
                     test_url = f"{url}?{param}={lfi_payload}"
-                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as lfi_resp:
+                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as lfi_resp:
                         if lfi_resp.status == 200:
                             lfi_body = await lfi_resp.text(errors="replace")
                             if re.search(verify_regex, lfi_body, re.IGNORECASE) and not self._is_false_positive_spa_response(lfi_body, lfi_resp.status):
@@ -997,14 +1034,14 @@ class VulnerabilityDetector(BaseScanner):
             for ssti_payload, expected_val, desc in ssti_vectors:
                 try:
                     test_url = f"{url}?{param}={ssti_payload}"
-                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as ssti_resp:
+                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as ssti_resp:
                         if ssti_resp.status == 200:
                             ssti_body = await ssti_resp.text(errors="replace")
                             # 严格防误报：计算结果必须存在，且原始表达式没有原样回显，且不是作为 URL 参数字符串被反射
                             if expected_val in ssti_body and ssti_payload not in ssti_body and not self._is_false_positive_spa_response(ssti_body, ssti_resp.status):
                                 # 进一步做基线确认：确保 expected_val 不是页面原本就有的数字
                                 baseline_url = f"{url}?{param}=das_ssti_baseline_check"
-                                async with session.get(baseline_url, timeout=aiohttp.ClientTimeout(total=4.0)) as base_resp:
+                                async with session.get(baseline_url, timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as base_resp:
                                     base_body = await base_resp.text(errors="replace")
                                     if expected_val not in base_body:
                                         # 二次动态验证：使用第二组独立随机数进行校验，杜绝任何偶发巧合
@@ -1013,7 +1050,7 @@ class VulnerabilityDetector(BaseScanner):
                                         sec_expected = str(p3 * p4)
                                         sec_payload = ssti_payload.replace(str(p1), str(p3)).replace(str(p2), str(p4))
                                         sec_url = f"{url}?{param}={sec_payload}"
-                                        async with session.get(sec_url, timeout=aiohttp.ClientTimeout(total=4.0)) as sec_resp:
+                                        async with session.get(sec_url, timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as sec_resp:
                                             if sec_resp.status == 200:
                                                 sec_body = await sec_resp.text(errors="replace")
                                                 if sec_expected in sec_body and sec_payload not in sec_body:
@@ -1059,7 +1096,7 @@ class VulnerabilityDetector(BaseScanner):
             for cmd_payload, marker, desc in cmd_vectors:
                 try:
                     test_url = f"{url}?{param}={cmd_payload}"
-                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as cmd_resp:
+                    async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as cmd_resp:
                         if cmd_resp.status == 200:
                             cmd_body = await cmd_resp.text(errors="replace")
                             is_reflection_only = False
@@ -1069,7 +1106,7 @@ class VulnerabilityDetector(BaseScanner):
                             
                             if marker in cmd_body and not is_reflection_only and not self._is_false_positive_spa_response(cmd_body, cmd_resp.status):
                                 baseline_url = f"{url}?{param}=das_cmd_baseline_check"
-                                async with session.get(baseline_url, timeout=aiohttp.ClientTimeout(total=4.0)) as base_resp:
+                                async with session.get(baseline_url, timeout=aiohttp.ClientTimeout(total=4.0), allow_redirects=False) as base_resp:
                                     base_body = await base_resp.text(errors="replace")
                                     if marker not in base_body:
                                         findings.append({
@@ -1106,7 +1143,7 @@ class VulnerabilityDetector(BaseScanner):
                 for ssrf_url, markers, desc in ssrf_targets:
                     try:
                         test_url = f"{url}?{param}={ssrf_url}"
-                        async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0)) as ssrf_resp:
+                        async with session.get(test_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as ssrf_resp:
                             if ssrf_resp.status == 200:
                                 ssrf_body = await ssrf_resp.text(errors="replace")
                                 is_html_webpage = "<!doctype html" in ssrf_body.lower() or "<html" in ssrf_body.lower()
@@ -1356,7 +1393,7 @@ class VulnerabilityDetector(BaseScanner):
                 continue
             try:
                 # 先获取原始 ID 的响应（作为基线）
-                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5.0)) as base_resp:
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as base_resp:
                     if base_resp.status != 200:
                         continue
                     base_body = await base_resp.text(errors="replace")
@@ -1368,7 +1405,7 @@ class VulnerabilityDetector(BaseScanner):
                 original_id = int(original_id_match.group(1))
                 tampered_url = api_url[:original_id_match.start(1)] + str(original_id + 1) + api_url[original_id_match.end(1):]
 
-                async with session.get(tampered_url, timeout=aiohttp.ClientTimeout(total=5.0)) as tamper_resp:
+                async with session.get(tampered_url, timeout=aiohttp.ClientTimeout(total=5.0), allow_redirects=False) as tamper_resp:
                     if tamper_resp.status == 200:
                         tamper_body = await tamper_resp.text(errors="replace")
                         if (

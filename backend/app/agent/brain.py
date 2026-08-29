@@ -60,12 +60,12 @@ class AgentBrain:
             })
 
             if not tasks:
-                final_response = "📋 **当前系统暂无巡检任务记录**。\n\n您可以随时告诉我：\n- `巡检 http://127.0.0.1:8088`（内置政企示范靶场）\n- `检查 https://msgbox-merc.vercel.app/`\n我将立即全自动下发探针矩阵为您探测！"
+                final_response = "📋 **当前系统暂无巡检任务记录**。\n\n请提供已获授权的 http/https 目标 URL（也可使用本地靶场地址做回归测试），我将按授权范围创建巡检任务。"
             else:
                 task_lines = []
                 for t in tasks:
                     s = json.loads(t["summary"]) if t["summary"] else {}
-                    score = s.get("security_score", 100)
+                    score = s.get("security_score", "未评分")
                     task_lines.append(f"- **{t['name']}** (`{t['target_url']}`) | 评分: **{score} 分** | 状态: `{t['status']}`")
                 
                 finding_lines = []
@@ -162,7 +162,7 @@ class AgentBrain:
             final_response = (
                 f"🛡️ **巡检任务执行完毕**\n\n"
                 f"- **目标站点**：`{target_url}`\n"
-                f"- **安全态势分**：`{final_summary.get('security_score', 100)} / 100` ({final_summary.get('status_level', '良好')})\n"
+                f"- **安全态势分**：`{final_summary.get('security_score', '未评分')} / 100` ({final_summary.get('status_level', '未生成评分')})\n"
                 f"- **扫描页面数**：`{final_summary.get('total_pages_scanned', 0)}` 个页面\n"
                 f"- **风险分布**：严重 {final_summary.get('severity_counts', {}).get('CRITICAL', 0)} | "
                 f"高危 {final_summary.get('severity_counts', {}).get('HIGH', 0)} | "
@@ -174,8 +174,7 @@ class AgentBrain:
             final_response = (
                 "👋 **收到您的指令**！\n\n"
                 "如果您想发起新的网站巡检，请直接告诉我目标网址，例如：\n"
-                "- `帮我检查 http://127.0.0.1:8088 是否存在源码泄露与身份证`\n"
-                "- `巡检 https://msgbox-merc.vercel.app/`\n\n"
+                "- `帮我检查 https://your-authorized-target.example 是否存在源码泄露与身份证`\n\n"
                 "如果您想查看当前情况，可以直接说：\n"
                 "- `帮我看看这几个任务有什么漏洞`\n"
                 "- `比对历史巡检`"
@@ -223,9 +222,6 @@ class AgentBrain:
         if not target_url:
             if "8088" in prompt or "靶场" in prompt or "示范" in prompt:
                 target_url = "http://127.0.0.1:8088"
-                intent_type = "SCAN_NEW"
-            elif "vercel" in prompt_lower or "测试站" in prompt:
-                target_url = "https://msgbox-merc.vercel.app"
                 intent_type = "SCAN_NEW"
         
         auth_domains = []

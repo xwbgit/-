@@ -11,6 +11,7 @@ import json
 import asyncio
 import uuid
 import os
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 # Enforce UTF-8 stdio
@@ -130,7 +131,7 @@ async def handle_security_audit(args: Dict[str, Any]) -> Dict[str, Any]:
     max_pages = int(args.get("max_pages", 15))
 
     task_id = str(uuid.uuid4())
-    now = "2026-08-26T15:00:00"
+    now = datetime.now().isoformat()
 
     scan_scope = {
         "max_depth": max_depth,

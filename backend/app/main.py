@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -17,30 +18,92 @@ logging.basicConfig(
 )
 logger = logging.getLogger("das_sentinel.main")
 
+
+async def _recover_pending_tasks(task_ids):
+    """服务启动后顺序恢复遗留的待执行实例，避免重启瞬间并发洪峰。"""
+    from backend.app.agent.orchestrator import InspectionOrchestrator
+
+    for task_id in task_ids:
+        try:
+            await InspectionOrchestrator(task_id).run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to recover pending task %s: %s", task_id, exc)
+
+
+def _mark_running_tasks_interrupted(reason: str) -> list[str]:
+    from backend.app.database import get_db_connection
+
+    conn = get_db_connection()
+    try:
+        running_ids = [
+            row["id"]
+            for row in conn.execute("SELECT id FROM tasks WHERE status = 'RUNNING'").fetchall()
+        ]
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'INTERRUPTED',
+                current_stage = ?,
+                finished_at = COALESCE(finished_at, datetime('now'))
+            WHERE status = 'RUNNING'
+            """,
+            (reason,),
+        )
+        conn.commit()
+        return running_ids
+    finally:
+        conn.close()
+
+
+def _pending_task_ids() -> list[str]:
+    from backend.app.database import get_db_connection
+
+    conn = get_db_connection()
+    try:
+        return [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM tasks WHERE status = 'PENDING' ORDER BY created_at ASC"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化数据库与定时调度器
     logger.info("Initializing DAS-SentinelAgent system database and background services...")
     init_db()
+    recovery_task = None
     try:
-        from backend.app.database import get_db_connection
-        conn = get_db_connection()
-        conn.execute("""
-            UPDATE tasks 
-            SET status = 'COMPLETED', progress = 100, current_stage = '智能巡检闭环完成，报告已生成'
-            WHERE status IN ('RUNNING', 'PENDING')
-        """)
-        conn.commit()
-        conn.close()
-        logger.info("Synchronized and reconciled stale tasks successfully.")
+        interrupted_ids = _mark_running_tasks_interrupted("服务重启导致本次执行中断，可重新发起巡检")
+        pending_ids = _pending_task_ids()
+        logger.info(
+            "Startup reconciliation: interrupted=%d, pending_to_recover=%d",
+            len(interrupted_ids),
+            len(pending_ids),
+        )
+        if pending_ids:
+            recovery_task = asyncio.create_task(
+                _recover_pending_tasks(pending_ids),
+                name="das-pending-task-recovery",
+            )
     except Exception as e:
         logger.warning(f"Task reconciliation warning: {e}")
 
     SchedulerService.start()
-    yield
-    # 关闭时清理
-    logger.info("Shutting down DAS-SentinelAgent background services...")
-    SchedulerService.shutdown()
+    try:
+        yield
+    finally:
+        # 关闭时清理，不把被取消的扫描伪装为完成。
+        logger.info("Shutting down DAS-SentinelAgent background services...")
+        if recovery_task and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+        _mark_running_tasks_interrupted("服务关停导致本次执行中断，可重新发起巡检")
+        SchedulerService.shutdown()
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -50,10 +113,11 @@ app = FastAPI(
 )
 
 # 跨域设置
+cors_origins = [origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     )

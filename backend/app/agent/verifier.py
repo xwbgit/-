@@ -34,23 +34,34 @@ class FindingVerifier:
         
         # 1. 行业 SRC 明确收录的【高价值实战漏洞】(SRC Exploitable Findings)
         # 满足条件：能造成实际破坏、获取敏感数据、接管主机、控制业务或绕过核心鉴权
-        if any(k in title for k in [
+        is_high_value_type = any(k in title for k in [
             "sql", "注入", "sqli", "ssti", "模板", "命令注入", "command", "rce", "代码执行",
             "文件读取", "路径穿越", "lfi", "path traversal", "bola", "idor", "越权", "未授权",
             "xss", "跨站脚本", "ssrf", "请求伪造", "挖矿", "后门", "暗链", "篡改", "涂鸦", "defacement",
-            "coinhive", "eval(", ".env", "backup.sql", ".git", "身份证", "银行卡", "accesskey",
+            "coinhive", "eval(", ".env", "backup.sql", ".git", "源代码", "源码泄露", "source code", "身份证", "银行卡", "accesskey",
             "数据库连接串", "jwt", "cors", "跨域"
-        ]):
+        ])
+        has_real_evidence = bool(finding.get("verified") and finding.get("evidence"))
+
+        if is_high_value_type and has_real_evidence:
             finding["src_type"] = "SRC_EXPLOITABLE"
             finding["src_status"] = "ACCEPTED_BY_SRC"
             finding["src_label"] = "🎯 SRC 有效实战漏洞"
             finding["src_reason"] = "具备确凿危害证明与利用链路，符合 SRC 中/高/严重漏洞收录与奖励标准"
+            finding["confidence_status"] = "CONFIRMED"
+        elif is_high_value_type:
+            finding["src_type"] = "SRC_SUSPECTED"
+            finding["src_status"] = "REQUIRES_REVIEW"
+            finding["src_label"] = "⚠️ 疑似实战风险"
+            finding["src_reason"] = "风险类型具备潜在危害，但当前证据不足，不能标记为已确认或直接用于 SRC 提报"
+            finding["confidence_status"] = "SUSPECTED"
         else:
             # 2. 属于【安全配置基线/行业合规项】(Baseline Hygiene)
             finding["src_type"] = "BASELINE_HYGIENE"
             finding["src_status"] = "BASELINE_ONLY"
             finding["src_label"] = "📋 安全基线与合规建议"
             finding["src_reason"] = "属于 HTTP 响应头或协议基线配置，按 SRC 标准通常不作为独立漏洞收录，建议作为纵深防御基线加固"
+            finding["confidence_status"] = "INFORMATIONAL" if sev in ("LOW", "INFO") else "SUSPECTED"
             
         return finding
 
@@ -103,6 +114,7 @@ class FindingVerifier:
         }
         src_counts = {
             "SRC_EXPLOITABLE": 0,
+            "SRC_SUSPECTED": 0,
             "BASELINE_HYGIENE": 0,
             "SRC_CRITICAL": 0,
             "SRC_HIGH": 0,
@@ -126,6 +138,8 @@ class FindingVerifier:
                 elif sev == "HIGH": src_counts["SRC_HIGH"] += 1
                 elif sev == "MEDIUM": src_counts["SRC_MEDIUM"] += 1
                 elif sev == "LOW": src_counts["SRC_LOW"] += 1
+            elif src_type == "SRC_SUSPECTED":
+                src_counts["SRC_SUSPECTED"] += 1
             else:
                 src_counts["BASELINE_HYGIENE"] += 1
                 
@@ -154,6 +168,7 @@ class FindingVerifier:
             "src_assessment": {
                 "has_src_vulnerabilities": src_counts["SRC_EXPLOITABLE"] > 0,
                 "src_exploitable_total": src_counts["SRC_EXPLOITABLE"],
+                "src_suspected_total": src_counts["SRC_SUSPECTED"],
                 "src_high_risk_total": src_counts["SRC_CRITICAL"] + src_counts["SRC_HIGH"],
                 "baseline_hygiene_total": src_counts["BASELINE_HYGIENE"]
             }
@@ -168,11 +183,31 @@ class FindingVerifier:
         title = finding.get("title", "")
         
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0)) as session:
-                async with session.get(url, allow_redirects=True) as resp:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8.0), trust_env=False) as session:
+                # 复测不跟随跨域重定向，避免把授权范围扩展到第三方站点。
+                async with session.get(url, allow_redirects=False) as resp:
                     status_code = resp.status
-                    text = await resp.text(errors="replace")
+                    body = await resp.content.read(1024 * 1024 + 1)
+                    body_truncated = len(body) > 1024 * 1024
+                    text = body[:1024 * 1024].decode(resp.charset or "utf-8", errors="replace")
                     headers = dict(resp.headers)
+
+                    if 300 <= status_code < 400:
+                        return {
+                            "retested": False,
+                            "is_still_vulnerable": None,
+                            "status_suggested": finding.get("status", "OPEN"),
+                            "reason": f"目标返回 HTTP {status_code} 重定向；为保持授权边界未跟随，无法判断是否已修复",
+                            "http_status": status_code,
+                        }
+                    if body_truncated:
+                        return {
+                            "retested": False,
+                            "is_still_vulnerable": None,
+                            "status_suggested": finding.get("status", "OPEN"),
+                            "reason": "响应超过复测大小上限，未据截断内容下结论",
+                            "http_status": status_code,
+                        }
                     
                     is_still_vulnerable = False
                     reason = ""
@@ -220,9 +255,9 @@ class FindingVerifier:
                     }
         except Exception as e:
             return {
-                "retested": True,
-                "is_still_vulnerable": False,
-                "status_suggested": "FIXED",
-                "reason": f"复测目标无法连接或已关闭: {str(e)}",
+                "retested": False,
+                "is_still_vulnerable": None,
+                "status_suggested": finding.get("status", "OPEN"),
+                "reason": f"复测失败，无法判断是否已修复: {str(e)}",
                 "http_status": 0
             }

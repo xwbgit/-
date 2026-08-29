@@ -73,6 +73,8 @@ class TamperDetector(BaseScanner):
         """判断链接是否属于本站或已授权安全域名"""
         try:
             parsed_href = urlparse(href)
+            if parsed_href.scheme and parsed_href.scheme not in ("http", "https"):
+                return False
             if not parsed_href.netloc:
                 return True # 相对路径属于本站
             netloc = parsed_href.netloc.lower().split(':')[0]
@@ -95,7 +97,6 @@ class TamperDetector(BaseScanner):
             if not href or href.startswith("javascript:") or href == "#":
                 continue
 
-            style = a_tag.get("style", "").lower().replace(" ", "")
             text = a_tag.get_text().strip()
             
             # 排除无障碍辅助朗读标签与合法下拉框菜单
@@ -107,16 +108,23 @@ class TamperDetector(BaseScanner):
             # 检测暗链 (仅当隐藏链接指向外部未知域名或包含黑产词时才告警，避免误伤前端下拉菜单/Tab)
             is_hidden = False
             hidden_reason = ""
-            if "display:none" in style:
-                is_hidden, hidden_reason = True, "样式 display:none 隐藏"
-            elif "visibility:hidden" in style:
-                is_hidden, hidden_reason = True, "样式 visibility:hidden 隐藏"
-            elif "font-size:0" in style:
-                is_hidden, hidden_reason = True, "字体大小为 0 像素隐藏"
-            elif "left:-" in style or "top:-999" in style or "margin-left:-999" in style:
-                is_hidden, hidden_reason = True, "利用负坐标偏离屏幕可视区域隐藏"
-            elif "opacity:0" in style:
-                is_hidden, hidden_reason = True, "透明度为 0 隐藏"
+            hidden_node = a_tag
+            styled_nodes = [(a_tag, "链接自身")]
+            styled_nodes.extend((parent, "父容器") for parent in list(a_tag.parents)[:3])
+            for node, source in styled_nodes:
+                style = str(node.get("style", "")).lower().replace(" ", "") if hasattr(node, "get") else ""
+                if "display:none" in style:
+                    is_hidden, hidden_reason, hidden_node = True, f"{source}样式 display:none 隐藏", node
+                elif "visibility:hidden" in style:
+                    is_hidden, hidden_reason, hidden_node = True, f"{source}样式 visibility:hidden 隐藏", node
+                elif "font-size:0" in style:
+                    is_hidden, hidden_reason, hidden_node = True, f"{source}字体大小为 0 像素隐藏", node
+                elif "left:-" in style or "top:-999" in style or "margin-left:-999" in style:
+                    is_hidden, hidden_reason, hidden_node = True, f"{source}利用负坐标偏离屏幕可视区域隐藏", node
+                elif "opacity:0" in style:
+                    is_hidden, hidden_reason, hidden_node = True, f"{source}透明度为 0 隐藏", node
+                if is_hidden:
+                    break
                 
             if is_hidden and not is_internal:
                 findings.append({
@@ -128,6 +136,7 @@ class TamperDetector(BaseScanner):
                     "param": f"Target Href: {href}",
                     "evidence": {
                         "matched_snippet": str(a_tag)[:300],
+                        "hidden_container_snippet": str(hidden_node)[:300],
                         "link_text": text,
                         "link_target": href,
                         "hidden_reason": hidden_reason

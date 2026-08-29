@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   das-sentinel-agent:
     build: .
@@ -7,11 +5,15 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"   # 主控制台与 API 服务
-      - "8088:8088"   # 内置示范靶场
+      - "8088:8088"   # 可选内置回归靶场（ENABLE_BUILTIN_LAB=true 时才监听）
     volumes:
       - ./data:/app/data
     environment:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8000
+      - ENABLE_BUILTIN_LAB=false
+      - LAB_HOST=0.0.0.0
       - LAB_PORT=8088
+      - ENABLE_EXTERNAL_TOOLS=false
+      - EXTERNAL_TOOL_ALLOWLIST=nuclei,gitleaks,zap
       - HENGNAO_PLATFORM_URL=https://gc.das-ai.com

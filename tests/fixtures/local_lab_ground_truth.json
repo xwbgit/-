@@ -1,0 +1,34 @@
+{
+  "dataset_id": "das-local-lab",
+  "version": "2026-08-28.1",
+  "target": "http://127.0.0.1:8088",
+  "positive_samples": [
+    {"id": "vuln-cors", "category": "VULN", "url_path": "/", "title_regex": "CORS"},
+    {"id": "vuln-git-head", "category": "VULN", "url_path": "/.git/HEAD", "title_regex": "Git"},
+    {"id": "vuln-env", "category": "VULN", "url_path": "/.env", "title_regex": "\\.env"},
+    {"id": "vuln-backup", "category": "VULN", "url_path": "/backup.sql", "title_regex": "backup\\.sql"},
+    {"id": "vuln-openapi", "category": "VULN", "url_path": "/openapi.json", "title_regex": "OpenAPI|Swagger"},
+    {"id": "vuln-profile-api", "category": "VULN", "url_path": "/api/profile", "title_regex": "API.*未授权"},
+    {"id": "vuln-user-api", "category": "VULN", "url_path": "/api/user", "title_regex": "API.*未授权"},
+
+    {"id": "tamper-hidden-display", "category": "TAMPER", "url_path": "/", "title_regex": "隐蔽暗链.*display:none"},
+    {"id": "tamper-hidden-offset", "category": "TAMPER", "url_path": "/", "title_regex": "隐蔽暗链.*负坐标"},
+    {"id": "tamper-gambling-link-1", "category": "TAMPER", "url_path": "/", "title_regex": "涉黑产|博彩|违规"},
+    {"id": "tamper-gambling-link-2", "category": "TAMPER", "url_path": "/", "title_regex": "涉黑产|博彩|违规"},
+    {"id": "tamper-defacement", "category": "TAMPER", "url_path": "/tampered_section.html", "title_regex": "篡改|涂鸦|Hacked"},
+    {"id": "tamper-miner", "category": "TAMPER", "url_path": "/miner_test.html", "title_regex": "挖矿|Coinhive|CryptoLoot"},
+
+    {"id": "sensitive-custom-root", "category": "SENSITIVE", "url_path": "/", "title_regex": "自定义敏感关键词.*扶持补贴资金"},
+    {"id": "sensitive-id-card", "category": "SENSITIVE", "url_path": "/news/notice_2026.html", "title_regex": "身份证"},
+    {"id": "sensitive-phone", "category": "SENSITIVE", "url_path": "/news/notice_2026.html", "title_regex": "手机号"},
+    {"id": "sensitive-bank-card", "category": "SENSITIVE", "url_path": "/news/notice_2026.html", "title_regex": "银行卡|信用卡"},
+    {"id": "sensitive-custom-news", "category": "SENSITIVE", "url_path": "/news/notice_2026.html", "title_regex": "自定义敏感关键词.*扶持补贴资金"},
+    {"id": "sensitive-email", "category": "SENSITIVE", "url_path": "/about.html", "title_regex": "邮箱|电子邮件|邮件地址"}
+  ],
+  "negative_samples": [
+    {"id": "negative-invalid-id", "category": "SENSITIVE", "url_path": "/benign_validation.html", "title_regex": "身份证"},
+    {"id": "negative-invalid-bank-card", "category": "SENSITIVE", "url_path": "/benign_validation.html", "title_regex": "银行卡|信用卡"},
+    {"id": "negative-placeholder-phone", "category": "SENSITIVE", "url_path": "/benign_validation.html", "title_regex": "手机号"},
+    {"id": "negative-accessibility-link", "category": "TAMPER", "url_path": "/benign_validation.html", "title_regex": "暗链|恶意外链"}
+  ]
+}

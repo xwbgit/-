@@ -5,7 +5,7 @@ import uuid
 from typing import Dict, Any, Optional, List
 from urllib.parse import urljoin
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import aiohttp
 
 from backend.app.config import settings
@@ -16,33 +16,59 @@ from plugins.scanner_core.vuln_detector import VulnerabilityDetector
 router = APIRouter(prefix="/msgbox", tags=["MsgBox 开发者接口与专项测试工具"])
 logger = logging.getLogger("das_sentinel.msgbox_tool")
 
-DEFAULT_API_TOKEN = "16886c609ab84b41cabc010c7e3dea297a478cb74129f072f7d886194c25dbba"
-DEFAULT_TARGET_URL = "https://msgbox-merc.vercel.app"
+DEFAULT_API_TOKEN = settings.MSGBOX_API_TOKEN.strip()
+DEFAULT_TARGET_URL = settings.MSGBOX_TARGET_URL.strip()
 
 class MsgBoxApiRequest(BaseModel):
-    base_url: str = DEFAULT_TARGET_URL
+    base_url: str = Field(default=DEFAULT_TARGET_URL, description="已获授权的目标站点根 URL")
     endpoint: str = "/api/messages"
     method: str = "GET"
-    api_token: str = DEFAULT_API_TOKEN
+    api_token: str = Field(default=DEFAULT_API_TOKEN, description="可选的目标站点 API Token，由调用方或部署环境提供")
     custom_headers: Optional[Dict[str, str]] = None
     query_params: Optional[Dict[str, str]] = None
     body_json: Optional[str] = None
 
 class MsgBoxScanLaunchRequest(BaseModel):
-    base_url: str = DEFAULT_TARGET_URL
-    api_token: str = DEFAULT_API_TOKEN
+    base_url: str = Field(default=DEFAULT_TARGET_URL, description="已获授权的目标站点根 URL")
+    api_token: str = Field(default=DEFAULT_API_TOKEN, description="可选的目标站点 API Token，由调用方或部署环境提供")
     max_depth: int = 2
     max_pages: int = 15
 
+def _validate_target_url(base_url: str) -> str:
+    """校验工作台目标，避免空值、凭据和绝对 endpoint 导致意外请求。"""
+    from urllib.parse import urlparse
+
+    value = (base_url or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="base_url 必须是有效的 http/https URL")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="base_url 不得携带明文用户名或密码")
+    return value.rstrip("/")
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    from urllib.parse import urlparse
+
+    value = (endpoint or "").strip()
+    parsed = urlparse(value)
+    if not value or parsed.scheme or parsed.netloc:
+        raise HTTPException(status_code=422, detail="endpoint 只能是目标站点内的相对路径")
+    return value
+
+
 @router.get("/config")
 def get_msgbox_config():
-    """获取 MsgBox 预置接口配置与 Token 状态"""
-    masked_token = DEFAULT_API_TOKEN[:8] + "****************" + DEFAULT_API_TOKEN[-8:]
+    """获取可选 MsgBox 工作台配置；不返回任何明文凭证。"""
+    token = DEFAULT_API_TOKEN
+    masked_token = (token[:4] + "…" + token[-4:]) if len(token) >= 8 else ""
     return {
         "target_url": DEFAULT_TARGET_URL,
-        "default_token": DEFAULT_API_TOKEN,
+        # 保留原字段形状以兼容旧前端，但永远不从服务端返回明文 Token。
+        "default_token": "",
         "masked_token": masked_token,
-        "token_length": len(DEFAULT_API_TOKEN),
+        "token_length": len(token),
+        "configured": bool(DEFAULT_TARGET_URL),
         "presets": [
             {
                 "id": "get_messages",
@@ -82,15 +108,21 @@ def get_msgbox_config():
 @router.post("/execute")
 async def execute_msgbox_request(req: MsgBoxApiRequest):
     """代理执行对目标 MsgBox 站点的 API 请求并收集详细通信与安全研判指标"""
-    target_full_url = urljoin(req.base_url.rstrip("/") + "/", req.endpoint.lstrip("/"))
+    base_url = _validate_target_url(req.base_url)
+    endpoint = _validate_endpoint(req.endpoint)
+    target_full_url = urljoin(base_url + "/", endpoint.lstrip("/"))
     
     headers = {
         "User-Agent": settings.DEFAULT_USER_AGENT,
         "Accept": "application/json, text/plain, */*",
-        "Authorization": f"Bearer {req.api_token}",
-        "X-API-Key": req.api_token,
-        "X-Developer-Token": req.api_token
     }
+    token = (req.api_token or "").strip()
+    if token:
+        headers.update({
+            "Authorization": f"Bearer {token}",
+            "X-API-Key": token,
+            "X-Developer-Token": token,
+        })
     if req.custom_headers:
         headers.update(req.custom_headers)
 
@@ -98,7 +130,7 @@ async def execute_msgbox_request(req: MsgBoxApiRequest):
     try:
         timeout = aiohttp.ClientTimeout(total=10.0)
         connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=timeout, trust_env=True) as session:
+        async with aiohttp.ClientSession(connector=connector, headers=headers, timeout=timeout, trust_env=False) as session:
             kwargs = {}
             if req.query_params:
                 kwargs["params"] = req.query_params
@@ -161,19 +193,20 @@ async def execute_msgbox_request(req: MsgBoxApiRequest):
 
 @router.post("/launch_scan")
 async def launch_authenticated_scan(req: MsgBoxScanLaunchRequest):
-    """一键为 MsgBox 目标发起带开发者 API 凭证的深度巡检任务"""
+    """为已授权 MsgBox 目标创建巡检任务；凭证不写入数据库。"""
+    base_url = _validate_target_url(req.base_url)
     task_id = str(uuid.uuid4())
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     
     from urllib.parse import urlparse
-    parsed = urlparse(req.base_url)
-    auth_domains = [parsed.netloc.split(':')[0]] if parsed.netloc else ["msgbox-merc.vercel.app"]
+    parsed = urlparse(base_url)
+    auth_domains = [parsed.hostname] if parsed.hostname else []
 
     scan_scope = {
         "max_depth": req.max_depth,
         "max_pages": req.max_pages,
         "qps_limit": 5.0,
-        "api_token": req.api_token,
+        "api_token_configured": bool((req.api_token or "").strip()),
         "custom_sensitive_keywords": ["api_key", "secret", "token", "password", "msgbox"]
     }
 
@@ -182,7 +215,7 @@ async def launch_authenticated_scan(req: MsgBoxScanLaunchRequest):
     cursor.execute("""
     INSERT INTO tasks (id, name, target_url, auth_domains, scan_scope, status, progress, current_stage, created_at)
     VALUES (?, ?, ?, ?, ?, 'PENDING', 0, 'MsgBox 专项安全巡检就绪', ?)
-    """, (task_id, f"MsgBox API 专项安全巡检: {req.base_url}", req.base_url, json.dumps(auth_domains), json.dumps(scan_scope), now))
+    """, (task_id, f"MsgBox API 专项安全巡检: {base_url}", base_url, json.dumps(auth_domains), json.dumps(scan_scope), now))
     conn.commit()
     conn.close()
 
@@ -194,6 +227,6 @@ async def launch_authenticated_scan(req: MsgBoxScanLaunchRequest):
     return {
         "status": "SUCCESS",
         "task_id": task_id,
-        "message": f"已成功为 MsgBox 站点 {req.base_url} 启动专项安全巡检任务",
+        "message": f"已成功为 MsgBox 站点 {base_url} 启动专项安全巡检任务",
         "created_at": now
     }

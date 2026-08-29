@@ -9,9 +9,9 @@ echo [1/2] Checking Python dependencies...
 python -m pip install -r requirements.txt -q
 
 echo.
-echo [2/2] Starting DAS-SentinelAgent and Target Lab...
+echo [2/2] Starting DAS-SentinelAgent (real-target mode)...
 echo Web Dashboard: http://127.0.0.1:8000
-echo Target Lab:    http://127.0.0.1:8088
+echo Built-in Lab:  disabled by default (set ENABLE_BUILTIN_LAB=true for local regression)
 echo.
 python run.py
 pause

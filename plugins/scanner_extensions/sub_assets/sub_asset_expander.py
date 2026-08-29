@@ -70,6 +70,7 @@ class SubAssetExpander(BaseScanner):
         self.sub_assets_data: List[Dict[str, Any]] = []
         self.risk_findings: List[Dict[str, Any]] = []
         self.catch_all_fingerprints: List[Dict[str, Any]] = []
+        self.enable_external_sources = False
 
     def _extract_root_domain(self, host: str) -> str:
         if not host:
@@ -156,7 +157,7 @@ class SubAssetExpander(BaseScanner):
             return results
         try:
             url = f"https://crt.sh/?q=%.{self.root_domain}&output=json"
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), trust_env=False) as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -182,31 +183,98 @@ class SubAssetExpander(BaseScanner):
                 ip = item[4][0]
                 if ip not in ips:
                     ips.append(ip)
+            # gethostbyname_ex exposes aliases on platforms where the resolver
+            # returns a CNAME chain; keep them as evidence for takeover checks.
+            _, aliases, _ = await loop.run_in_executor(None, socket.gethostbyname_ex, hostname)
+            cnames = sorted({str(alias).rstrip('.').lower() for alias in aliases if alias})
         except Exception:
             pass
         return {"ips": ips, "cnames": cnames}
 
     async def _probe_subdomain_web(self, hostname: str) -> Optional[Dict[str, Any]]:
         role_info = self._classify_sub_asset_role(hostname)
-        return {
+        is_target = hostname == self.target_host
+        port_suffix = f":{self.target_port}" if is_target and self.target_port not in (80, 443) else ""
+        preferred_scheme = self.target_scheme if is_target else "https"
+        preferred_url = f"{preferred_scheme}://{hostname}{port_suffix}"
+        ownership_confirmed = self.scope_manager.is_in_scope(preferred_url)
+        dns_result = await self._resolve_dns(hostname)
+
+        asset = {
             "hostname": hostname,
-            "url": f"https://{hostname}",
-            "status": 200,
-            "title": hostname,
-            "server": "Web",
-            "ips": ["1.2.3.4"],
-            "cnames": [],
+            "url": preferred_url,
+            "status": None,
+            "title": "",
+            "server": "",
+            "ips": dns_result["ips"],
+            "cnames": dns_result["cnames"],
             "is_cdn": False,
-            "cdn_vendor": "Direct",
+            "cdn_vendor": None,
             "role": role_info["role"],
             "category": role_info["category"],
             "icon": role_info["icon"],
             "color": role_info["color"],
             "tier": "Application Tier",
             "desc": role_info["desc"],
-            "scheme": "https",
-            "takeover_risk": None
+            "scheme": preferred_scheme,
+            "takeover_risk": None,
+            "discovery_state": "RESOLVED" if dns_result["ips"] else "DISCOVERED",
+            "ownership_confirmed": ownership_confirmed,
+            "visited": False
         }
+
+        if not ownership_confirmed or not dns_result["ips"]:
+            return asset
+
+        schemes = [preferred_scheme]
+        if not is_target:
+            schemes.append("http")
+        timeout = aiohttp.ClientTimeout(total=5.0)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            for scheme in schemes:
+                probe_url = f"{scheme}://{hostname}{port_suffix}"
+                try:
+                    async with session.get(probe_url, allow_redirects=False, ssl=False) as resp:
+                        raw_body = await resp.content.read(65536)
+                        body = raw_body.decode(resp.charset or "utf-8", errors="replace")
+                        title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+                        asset.update({
+                            "url": str(resp.url),
+                            "status": resp.status,
+                            "title": re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else "",
+                            "server": resp.headers.get("Server", ""),
+                            "scheme": scheme,
+                            "discovery_state": "VISITED",
+                            "visited": True
+                        })
+                        takeover = self._check_takeover_risk(dns_result["cnames"], body, resp.status)
+                        asset["takeover_risk"] = takeover
+                        if takeover:
+                            self.risk_findings.append({
+                                "id": f"sub-risk-takeover-{hostname}",
+                                "category": "VULN",
+                                "severity": "HIGH",
+                                "level": "HIGH",
+                                "title": f"疑似子域名接管 ({hostname})",
+                                "url": str(resp.url),
+                                "param": "",
+                                "impact": f"{hostname} 的 DNS CNAME 与 {takeover['service']} 服务指纹匹配，可能存在悬挂资源被接管风险。",
+                                "evidence": {
+                                    "response_status": resp.status,
+                                    "cnames": dns_result["cnames"],
+                                    "service": takeover["service"],
+                                    "matched_snippet": takeover["evidence"]
+                                },
+                                "remediation": "确认 DNS 记录与云服务资源归属；不再使用的记录应及时删除，使用中的资源应重新绑定并限制服务端响应。",
+                                "verified": 1,
+                                "cvss_score": 7.5,
+                                "status": "OPEN"
+                            })
+                        self._evaluate_sub_asset_risks(asset, body)
+                        return asset
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    continue
+        return asset
 
     def _evaluate_sub_asset_risks(self, sub_asset: Dict[str, Any], body: str) -> None:
         title = sub_asset.get("title", "")
@@ -218,10 +286,18 @@ class SubAssetExpander(BaseScanner):
                 "severity": "HIGH",
                 "level": "HIGH",
                 "title": f"子资产存在目录遍历/索引泄露 ({hostname})",
-                "target": sub_asset.get("url", hostname),
-                "description": f"子资产 {hostname} 开启了 Web 目录列表 (Directory Listing)，可能泄露源码、备份和配置文件。",
-                "evidence": f"Title matched 'Index of /': {title}",
-                "remediation": "在 Web 服务器 (Nginx/Apache) 配置中禁用 autoindex 指令。"
+                "url": sub_asset.get("url", hostname),
+                "param": "",
+                "impact": f"子资产 {hostname} 开启了 Web 目录列表，可能泄露源码、备份和配置文件。",
+                "evidence": {
+                    "response_status": sub_asset.get("status"),
+                    "matched_snippet": f"Title matched 'Index of /': {title}",
+                    "ips": sub_asset.get("ips", [])
+                },
+                "remediation": "在 Web 服务器 (Nginx/Apache) 配置中禁用 autoindex 指令。",
+                "verified": 1,
+                "cvss_score": 7.5,
+                "status": "OPEN"
             })
 
     async def expand_and_probe_all(self, pages_data: List[Dict[str, Any]] = None, js_scripts: List[Dict[str, Any]] = None, external_links: List[str] = None) -> Dict[str, Any]:
@@ -229,25 +305,19 @@ class SubAssetExpander(BaseScanner):
         extracted = self.passive_extract_from_crawled_content(pages_data, js_scripts, external_links)
         self.discovered_subdomains.update(extracted)
 
-        # 尝试 crt.sh
-        crt_domains = await self._query_crt_sh()
-        self.discovered_subdomains.update(crt_domains)
+        # 公网证书透明度属于可选外部数据源；本地/离线模式默认不访问。
+        if self.enable_external_sources:
+            crt_domains = await self._query_crt_sh()
+            self.discovered_subdomains.update(crt_domains)
 
         active_sub_assets = []
-        for host in self.discovered_subdomains:
+        for host in sorted(self.discovered_subdomains):
             if host:
-                active_sub_assets.append({
-                    "hostname": host,
-                    "url": f"https://{host}",
-                    "status": 200,
-                    "title": host,
-                    "role": self._classify_sub_asset_role(host)["role"],
-                    "category": self._classify_sub_asset_role(host)["category"]
-                })
+                active_sub_assets.append(await self._probe_subdomain_web(host))
 
         return {
             "root_domain": self.root_domain,
-            "active_sub_assets_count": len(active_sub_assets),
+            "active_sub_assets_count": sum(1 for item in active_sub_assets if item.get("visited")),
             "sub_assets": active_sub_assets,
             "risk_findings": self.risk_findings,
             "topology_cluster": {"nodes": active_sub_assets}
@@ -261,6 +331,7 @@ class SubAssetExpander(BaseScanner):
         self.target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self.target_scheme = parsed.scheme or "http"
         self.root_domain = self._extract_root_domain(self.target_host)
+        self.enable_external_sources = bool(context.scan_scope.get("enable_external_asset_sources", False))
         
         self.scope_manager = SRCScopingEngine(auth_domains=self.auth_domains)
         res = await self.expand_and_probe_all(

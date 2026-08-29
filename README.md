@@ -18,9 +18,11 @@ DAS-SentinelAgent (安恒星巡) 是一款集成了**全自动化 Web 资产爬�
 │       ├── 📁 sub_assets/           -> ① 资产与子域名测绘方向 (爬虫/子域/架构指纹)
 │       ├── 📁 exploit_chain/        -> ② 漏洞利用链与深度渗透方向 (利用链推演)
 │       ├── 📁 link_processor/       -> ③ 特殊链接提取与外链清洗方向 (动态JS路由挖掘)
-│       └── 📁 api_fuzzer/           -> ④ REST API 接口模糊探测方向 (Swagger/API探针)
+│       ├── 📁 api_fuzzer/           -> ④ REST API 接口轻量探测方向 (Swagger/API探针)
+│       └── 📁 tool_adapters/       -> ⑤ 可选 Nuclei/Gitleaks/ZAP 真实命令行适配层
+├── 📁 backend/app/evaluation/           -> 📊 标注集 Precision/Recall/F1/FPR 计算器
 ├── 📁 scripts/                      -> 🛠️ 辅助运维与调试脚本工具箱 (12个独立脚本集中收纳)
-├── 📁 tests/                        -> 🧪 自动化测试套件 [状态: 21/21 项测试 100% 全部通过]
+├── 📁 tests/                        -> 🧪 自动化测试套件（默认离线回归 + 可选本地靶场集成测试）
 └── 📁 obsidian/                     -> 📖 Obsidian 双链体系完整知识库 (8篇全景笔记)
 ```
 
@@ -35,14 +37,23 @@ DAS-SentinelAgent (安恒星巡) 是一款集成了**全自动化 Web 资产爬�
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 运行全量自动化测试套件 (验证 21/21 项通过)
+# 2. 运行默认离线回归测试（不访问外部站点）
 python -m pytest -v
 
-# 3. 启动服务 (控制台 + 内置测试靶场)
+# 3. 显式运行本地靶场集成测试（PowerShell）
+$env:RUN_LAB_INTEGRATION="1"
+python -m pytest -v tests/test_agent_orchestrator.py tests/test_deep_vulnerabilities.py
+
+# 4. 启动服务（真实目标模式，默认不启动内置测试靶场）
 python run.py
 ```
 - 控制台前端地址: `http://127.0.0.1:8000`
-- 内置测试靶场地址: `http://127.0.0.1:8088`
+
+如需本地回归靶场，先设置 `ENABLE_BUILTIN_LAB=true` 后再运行 `python run.py`；靶场地址为 `http://127.0.0.1:8088`。该靶场只用于测试，不代表真实站点检测效果。
+
+可选外部工具不随仓库捆绑，默认不执行。安装并审核对应工具后，可使用环境变量 `ENABLE_EXTERNAL_TOOLS=true` 和 `EXTERNAL_TOOL_ALLOWLIST=nuclei,gitleaks,zap` 开启。每次执行的版本、耗时、退出码和结果数会写入任务摘要 `tool_runs`。
+
+CVE 关联不在巡检时联网；可将已下载的 NVD JSON 通过 `scripts/import_nvd_catalog.py` 转换为本地目录，并用 `CVE_CATALOG_PATH` 指定路径。缺少可复核版本或目录时，系统不会猜测 CVE。
 
 ---
 

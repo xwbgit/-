@@ -31,9 +31,18 @@ def init_db():
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
-        summary TEXT                         -- JSON: 统计结果 (漏洞数、高危、中危等)
+        summary TEXT,                        -- JSON: 统计结果 (漏洞数、高危、中危等)
+        parent_task_id TEXT,                 -- 周期模板或上一次执行的任务 ID
+        run_kind TEXT DEFAULT 'MANUAL'       -- MANUAL, SCHEDULED_RUN, RETEST
     )
     """)
+
+    # 兼容旧数据库：CREATE TABLE IF NOT EXISTS 不会自动增加新列。
+    existing_task_columns = {row[1] for row in cursor.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "parent_task_id" not in existing_task_columns:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT")
+    if "run_kind" not in existing_task_columns:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN run_kind TEXT DEFAULT 'MANUAL'")
     
     # 2. 漏洞/风险发现记录表 (Findings)
     cursor.execute("""
@@ -48,7 +57,7 @@ def init_db():
         evidence TEXT NOT NULL,              -- JSON: 请求报文/响应报文/上下文匹配高亮
         impact TEXT NOT NULL,                -- 危害影响分析
         remediation TEXT NOT NULL,           -- 修复建议
-        verified INTEGER DEFAULT 1,          -- 是否经智能体验证 (1: 是, 0: 疑似)
+        verified INTEGER DEFAULT 0,          -- 是否经真实证据验证 (1: 是, 0: 疑似)
         cvss_score REAL DEFAULT 0.0,
         status TEXT DEFAULT 'OPEN',          -- OPEN, FIXED, IGNORED, FALSE_POSITIVE
         src_type TEXT DEFAULT 'BASELINE_HYGIENE', -- SRC_EXPLOITABLE (实战漏洞) vs BASELINE_HYGIENE (基线合规)

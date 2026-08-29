@@ -1,6 +1,12 @@
+import os
 import pytest
 import aiohttp
 from plugins.scanner_core.vuln_detector import VulnerabilityDetector
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_LAB_INTEGRATION") != "1",
+    reason="本地靶场集成测试需显式设置 RUN_LAB_INTEGRATION=1"
+)
 
 @pytest.mark.anyio
 async def test_deep_industrial_vulnerability_scanner():

@@ -12,11 +12,19 @@ router = APIRouter(prefix="/tasks", tags=["巡检任务管理"])
 
 @router.post("", response_model=TaskResponse)
 async def create_task(task_in: TaskCreateRequest, background_tasks: BackgroundTasks):
+    if task_in.cron_expr:
+        try:
+            SchedulerService.validate_cron_expr(task_in.cron_expr)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     conn = get_db_connection()
     cursor = conn.cursor()
     
     task_id = f"task-{uuid.uuid4().hex[:8]}"
     now = datetime.now().isoformat()
+    initial_status = "SCHEDULED" if task_in.cron_expr else "PENDING"
+    initial_stage = "周期任务已登记，等待下次触发" if task_in.cron_expr else "任务已创建，等待调度"
     
     scan_scope = {
         "max_depth": task_in.max_depth,
@@ -29,12 +37,12 @@ async def create_task(task_in: TaskCreateRequest, background_tasks: BackgroundTa
     }
     
     cursor.execute("""
-    INSERT INTO tasks (id, name, target_url, auth_domains, scan_scope, cron_expr, status, progress, current_stage, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 0, '任务已创建，等待调度', ?)
+    INSERT INTO tasks (id, name, target_url, auth_domains, scan_scope, cron_expr, status, progress, current_stage, created_at, run_kind)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'MANUAL')
     """, (
         task_id, task_in.name, task_in.target_url,
         json.dumps(task_in.auth_domains), json.dumps(scan_scope),
-        task_in.cron_expr, now
+        task_in.cron_expr, initial_status, initial_stage, now
     ))
     conn.commit()
     conn.close()
@@ -54,9 +62,9 @@ async def create_task(task_in: TaskCreateRequest, background_tasks: BackgroundTa
         name=task_in.name,
         target_url=task_in.target_url,
         auth_domains=task_in.auth_domains,
-        status="PENDING",
+        status=initial_status,
         progress=0,
-        current_stage="任务已创建，正在排队启动",
+        current_stage=initial_stage,
         created_at=now,
         started_at=None,
         finished_at=None,
@@ -117,21 +125,16 @@ async def get_task(task_id: str):
 
 @router.post("/{task_id}/rerun")
 async def rerun_task(task_id: str, background_tasks: BackgroundTasks):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
-    if not cursor.fetchone():
-        conn.close()
+    try:
+        new_task_id = SchedulerService.create_scan_run(task_id, run_kind="RETEST")
+    except ValueError:
         raise HTTPException(status_code=404, detail="Task not found")
-    cursor.execute("UPDATE tasks SET status = 'PENDING', progress = 0, current_stage = '准备重新执行巡检' WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
     
     async def async_run():
-        orchestrator = InspectionOrchestrator(task_id)
+        orchestrator = InspectionOrchestrator(new_task_id)
         await orchestrator.run()
     background_tasks.add_task(async_run)
-    return {"message": "Task re-run triggered successfully", "task_id": task_id}
+    return {"message": "Task re-run triggered successfully", "task_id": new_task_id, "source_task_id": task_id}
 
 @router.get("/{task_id}/details")
 async def get_task_details(task_id: str):
@@ -168,21 +171,22 @@ async def get_task_details(task_id: str):
             path += "?" + parsed.query
             
         req_headers = evidence.get("request_headers") or {}
-        req_headers_str = f"GET {path} HTTP/1.1\r\nHost: {parsed.netloc}\r\nUser-Agent: DAS-SentinelAgent/1.0 (Security Inspector; DAS-AI)\r\nAccept: */*\r\nConnection: close\r\n"
+        request_method = evidence.get("request_method", "GET")
+        req_headers_str = f"[根据发现记录重建，非原始报文]\r\n{request_method} {path} HTTP/1.1\r\nHost: {parsed.netloc}\r\n"
         for k, v in req_headers.items():
             req_headers_str += f"{k}: {v}\r\n"
         f["raw_request"] = req_headers_str
         
         resp_headers = evidence.get("response_headers") or {}
-        resp_status = evidence.get("response_status", 200)
-        resp_headers_str = f"HTTP/1.1 {resp_status} OK\r\n"
-        for k, v in resp_headers.items():
-            resp_headers_str += f"{k}: {v}\r\n"
-        if not resp_headers:
-            resp_headers_str += "Content-Type: text/html; charset=utf-8\r\nServer: WebServer\r\n"
-            
-        matched_sample = evidence.get("matched_snippet", "")
-        f["raw_response"] = f"{resp_headers_str}\r\n{matched_sample}"
+        resp_status = evidence.get("response_status")
+        if resp_status is None:
+            f["raw_response"] = "[未保存原始响应，无法重建 HTTP 状态与响应头]"
+        else:
+            resp_headers_str = f"HTTP/1.1 {resp_status}\r\n"
+            for k, v in resp_headers.items():
+                resp_headers_str += f"{k}: {v}\r\n"
+            matched_sample = evidence.get("matched_snippet", "")
+            f["raw_response"] = f"{resp_headers_str}\r\n{matched_sample}"
         findings.append(f)
         
     # 3. 站点资产拓扑地图 (Sitemap)
@@ -223,8 +227,9 @@ async def delete_task(task_id: str):
     """彻底删除指定任务及其相关数据"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM tasks WHERE id = ?", (task_id,))
-    if not cursor.fetchone():
+    cursor.execute("SELECT id, cron_expr FROM tasks WHERE id = ?", (task_id,))
+    task = cursor.fetchone()
+    if not task:
         conn.close()
         raise HTTPException(status_code=404, detail="Task not found")
         
@@ -233,6 +238,8 @@ async def delete_task(task_id: str):
     cursor.execute("DELETE FROM baselines WHERE task_id = ?", (task_id,))
     conn.commit()
     conn.close()
+    if task["cron_expr"]:
+        SchedulerService.remove_cron_job(task_id)
     return {"message": "Task and related records deleted successfully", "task_id": task_id}
 
 
@@ -270,6 +277,8 @@ async def cleanup_keep_latest_tasks():
         conn.commit()
     
     conn.close()
+    for task_id in to_delete:
+        SchedulerService.remove_cron_job(task_id)
     return {"deleted_count": len(to_delete), "message": f"成功清理 {len(to_delete)} 个冗余历史任务，每个目标仅保留最新巡检基线。"}
 
 @router.post("/cleanup/all-completed")
@@ -303,16 +312,7 @@ async def batch_delete_tasks(payload: dict):
     cursor.execute(f"DELETE FROM baselines WHERE task_id IN ({placeholders})", task_ids)
     conn.commit()
     conn.close()
+    for task_id in task_ids:
+        SchedulerService.remove_cron_job(task_id)
     return {"deleted_count": len(task_ids), "message": f"已成功删除 {len(task_ids)} 个任务"}
-
-@router.delete("/{task_id}")
-async def delete_task(task_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    cursor.execute("DELETE FROM findings WHERE task_id = ?", (task_id,))
-    cursor.execute("DELETE FROM baselines WHERE task_id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Task deleted successfully", "task_id": task_id}
 

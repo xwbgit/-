@@ -19,6 +19,9 @@
 | **敏感信息防泄露** | `CustomEnterpriseRuleEngine`| 自定义规则引擎 | 支持单位自定义关键词、正则表达式、敏感文件后缀实时匹配与沙箱测试 | 纯内存沙箱执行，安全可控 |
 | **基线与持续运营** | `BaselineDiffEngine` | 基于 SHA-256 / SimHash | 历史快照版本比对、DOM 异动告警、漏洞闭环状态追踪 | 数据库内离线比对 |
 | **定时调度** | `APScheduler` | 开源 `APScheduler 3.10+` | 周期性巡检任务调度 (支持 Cron 表达式) | 异步轻量调度器 |
+| **可选外部漏扫** | `NucleiAdapter` | ProjectDiscovery Nuclei | 检查可执行文件和版本，运行签名模板并解析 JSONL | 授权域校验、QPS/超时、禁用未签名模板，排除 dos/fuzz/intrusive/bruteforce 标签 |
+| **可选外部敏感检查** | `GitleaksAdapter` | Gitleaks | 将已爬取 HTML/JS 写入临时目录后扫描，转换 JSON 报告 | 不克隆目标仓库，报告强制 `--redact=100`，不持久化密钥原文 |
+| **可选外部配置检查** | `ZapBaselineAdapter` | OWASP ZAP Baseline | 运行限时蜘蛛和被动扫描，解析 JSON 报告 | 仅接入 Baseline，不调用 Full Scan/主动攻击扫描 |
 
 ---
 
@@ -26,5 +29,29 @@
 
 1. **严格授权边界**：爬虫与探测探针在发起请求前，必须通过 `is_authorized()` 域名白名单匹配，严禁越界探测未经授权的外部网络。
 2. **非破坏性验证**：不发送含有 SQL 注入破坏性删表、XSS 弹窗利用、命令执行溢出等可能导致目标业务中断或数据污染的 Payload。
-3. **速率控制 (Rate Limiting)**：默认 QPS 限制在 5.0 以内，并发数限制在 5 以内，并提供超时断开机制，防范对目标站点造成拒绝服务 (DoS)。
+3. **速率控制 (Rate Limiting)**：默认 QPS 限制为 5.0，并发上限为 20，同时设置请求和外部工具超时。
 4. **全流程审计日志**：每一次探针调用、资产发现、漏洞触发均记录于系统 `audit_logs` 表中，满足等保与日志留存合规要求。
+
+## 3. 外部工具开启方式
+
+外部工具默认关闭，且不随项目镜像捆绑分发。部署者应先独立审核、安装所需二进制，再设置：
+
+```dotenv
+ENABLE_EXTERNAL_TOOLS=true
+EXTERNAL_TOOL_ALLOWLIST=nuclei,gitleaks,zap
+EXTERNAL_TOOL_TIMEOUT_SEC=180
+```
+
+未安装、未在允许清单、超时或返回异常的工具会在任务摘要 `tool_runs` 中记录 `SKIPPED`/`TIMED_OUT`/`FAILED`，不会生成虚假 Finding。
+
+## 4. 指纹与 CVE 关联
+
+指纹引擎只在响应头、HTML 特征或已保存发现证据中出现明确产品和版本时生成 CPE 候选。`CVEIntelMatcher` 仅读取本地 `CVE_CATALOG_PATH`，根据受影响版本边界关联；命中结果统一标为“版本关联待复核”，不作为已验证漏洞。
+
+可使用已下载的 NVD CVE API 2.0 JSON 生成本地目录：
+
+```powershell
+python scripts/import_nvd_catalog.py nvd-export.json data/cve_catalog.json --source-label "NVD CVE API 2.0 export 2026-08-28"
+```
+
+如目录不存在或格式错误，报告中只记录 `NOT_CONFIGURED`/`INVALID_CATALOG`，不会生成 CVE Finding。

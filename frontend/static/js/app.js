@@ -1,4 +1,9 @@
 const API_BASE = '/api/v1';
+const taskConfig = {
+    max_depth: { default: 3, min: 1, max: 5 },
+    max_pages: { default: 100, min: 5, max: 500 },
+    qps_limit: { default: 5.0, min: 0.5, max: 20.0 }
+};
 
 let activeTab = 'dashboard';
 let pollingTimer = null;
@@ -93,9 +98,13 @@ async function updateTokenTelemetry() {
         if (res.ok) {
             const data = await res.json();
             const el = document.getElementById('topbar-token-count');
-            if (el && data.total_tokens) {
-                const m = (data.total_tokens / 1000000).toFixed(2);
-                el.innerText = `${m}M Tokens (约 ¥${data.estimated_cost_cny})`;
+            if (el) {
+                if (data.total_tokens) {
+                    const m = (data.total_tokens / 1000000).toFixed(2);
+                    el.innerText = `${m}M Tokens (约 ¥${data.estimated_cost_cny ?? '--'})`;
+                } else {
+                    el.innerText = '未配置统计';
+                }
             }
         }
     } catch (e) {}
@@ -185,12 +194,11 @@ function getDashboardHTML() {
             <div class="card-title"><span>🚀 一键快速启动网站巡检</span></div>
             <p style="font-size:13px; color:#64748b; margin-bottom:14px;">输入目标网址，智能体会自动寻找页面、探测源码漏洞、检查身份证/手机号泄露并排查暗链：</p>
             <div style="display:flex; gap:10px; margin-bottom:12px;">
-                <input type="text" id="quick-target-url" class="form-input" placeholder="输入要检查的网站网址 (如 http://127.0.0.1:8088)" value="http://127.0.0.1:8088">
+                <input type="text" id="quick-target-url" class="form-input" placeholder="输入已获授权的网站网址" value="">
                 <button class="btn btn-primary" onclick="triggerQuickScan()">开始检查</button>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
                 <button class="btn" style="font-size:12px; padding:4px 10px;" onclick="document.getElementById('quick-target-url').value='http://127.0.0.1:8088'">🎯 填入内置示范靶场 (8088)</button>
-                <button class="btn" style="font-size:12px; padding:4px 10px;" onclick="document.getElementById('quick-target-url').value='https://msgbox-merc.vercel.app/'">🌐 填入测试站点 (Vercel)</button>
             </div>
         </div>
 
@@ -254,17 +262,20 @@ async function loadDashboardStats() {
         if (statCritical) statCritical.innerText = criticalHigh;
 
         if (tasks.length > 0 && tasks[0].summary) {
-            const score = tasks[0].summary.security_score !== undefined ? tasks[0].summary.security_score : 100;
+            const score = tasks[0].summary.security_score !== undefined ? tasks[0].summary.security_score : null;
             if (statScore) {
-                statScore.innerText = score;
-                statScore.style.color = score >= 85 ? '#16a34a' : (score >= 60 ? '#d97706' : '#dc2626');
+                statScore.innerText = score === null ? '--' : score;
+                statScore.style.color = score === null ? '#64748b' : (score >= 85 ? '#16a34a' : (score >= 60 ? '#d97706' : '#dc2626'));
             }
             if (statStatusText) {
-                statStatusText.innerText = score >= 85 ? '🟢 安全状态良好' : (score >= 60 ? '🟡 存在安全隐患' : '🔴 面临严重风险');
+                statStatusText.innerText = score === null ? '⚪ 尚未生成评分' : (score >= 85 ? '🟢 安全状态良好' : (score >= 60 ? '🟡 存在安全隐患' : '🔴 面临严重风险'));
             }
         } else {
-            if (statScore) statScore.innerText = '100';
-            if (statStatusText) statStatusText.innerText = '🟢 暂无风险记录';
+            if (statScore) {
+                statScore.innerText = '--';
+                statScore.style.color = '#64748b';
+            }
+            if (statStatusText) statStatusText.innerText = '⚪ 尚未生成评分';
         }
 
         const vulnCnt = findings.filter(f => f.category === 'VULN').length;
@@ -288,19 +299,19 @@ async function loadDashboardStats() {
                 let html = '<table class="data-table"><thead><tr><th>任务名称</th><th>目标网址</th><th>执行状态</th><th>检查进度</th><th>创建时间</th><th>快捷操作</th></tr></thead><tbody>';
                 tasks.slice(0, 5).forEach(t => {
                     html += `<tr>
-                        <td><strong>${t.name}</strong><br><span style="font-size:11px; color:#64748b;">${t.id}</span></td>
-                        <td><code style="color:#0284c7; cursor:pointer;" onclick="openTaskDetailsView('${t.id}')">${t.target_url}</code></td>
-                        <td><span class="tag ${t.status === 'COMPLETED' ? 'tag-low' : (t.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${t.status === 'COMPLETED' ? '已完成' : (t.status === 'RUNNING' ? '检查中' : t.status)}</span></td>
+                        <td><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:11px; color:#64748b;">${escapeHtml(t.id)}</span></td>
+                        <td><code style="color:#0284c7; cursor:pointer;" onclick="openTaskDetailsView(${safeInlineArg(t.id)})">${escapeHtml(t.target_url)}</code></td>
+                        <td><span class="tag ${t.status === 'COMPLETED' ? 'tag-low' : (t.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${t.status === 'COMPLETED' ? '已完成' : (t.status === 'RUNNING' ? '检查中' : escapeHtml(t.status))}</span></td>
                         <td style="width:160px;">
-                            <div style="font-size:11px; color:#64748b;">${t.current_stage || ''} (${t.progress}%)</div>
+                            <div style="font-size:11px; color:#64748b;">${escapeHtml(t.current_stage || '')} (${escapeHtml(t.progress)}%)</div>
                             <div class="progress-bar"><div class="progress-val" style="width:${t.progress}%"></div></div>
                         </td>
-                        <td>${t.created_at.replace('T', ' ').substring(0, 19)}</td>
+                        <td>${escapeHtml((t.created_at || '').replace('T', ' ').substring(0, 19))}</td>
                         <td>
                             <div style="display:flex; gap:6px;">
-                                <button class="btn btn-primary" style="font-size:11px; padding:3px 8px;" onclick="openTaskDetailsView('${t.id}')">🔍 详情与报文</button>
-                                ${t.status === 'COMPLETED' ? `<button class="btn" style="font-size:11px; padding:3px 8px;" onclick="window.open('/api/v1/reports/${t.id}/html')">📄 查看浅色报告</button>` : ''}
-                                <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fecdd3; background:#fff1f2;" onclick="deleteTaskDirect('${t.id}')">🗑️ 删除</button>
+                                <button class="btn btn-primary" style="font-size:11px; padding:3px 8px;" onclick="openTaskDetailsView(${safeInlineArg(t.id)})">🔍 详情与报文</button>
+                                ${t.status === 'COMPLETED' ? `<button class="btn" style="font-size:11px; padding:3px 8px;" onclick="window.open(${safeInlineArg(`/api/v1/reports/${t.id}/html`)})">📄 查看浅色报告</button>` : ''}
+                                <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fecdd3; background:#fff1f2;" onclick="deleteTaskDirect(${safeInlineArg(t.id)})">🗑️ 删除</button>
                             </div>
                         </td>
                     </tr>`;
@@ -327,6 +338,13 @@ async function deleteTaskDirect(id) {
 async function triggerQuickScan() {
     const url = document.getElementById('quick-target-url').value.trim();
     if (!url) return alert('请输入目标网址');
+    let targetHost = '';
+    try {
+        targetHost = new URL(url).hostname;
+    } catch (e) {
+        return alert('请输入完整的 http/https 网址');
+    }
+    if (!confirm(`请确认已获得对域名【${targetHost}】的巡检授权。本次任务只允许访问该域名及其子域。`)) return;
     
     try {
         const res = await fetch(`${API_BASE}/tasks`, {
@@ -335,13 +353,14 @@ async function triggerQuickScan() {
             body: JSON.stringify({
                 name: `即时巡检 - ${url}`,
                 target_url: url,
-                auth_domains: [],
-                max_depth: 3,
-                max_pages: 5000,
-                qps_limit: 50.0
+                auth_domains: [targetHost],
+                max_depth: taskConfig.max_depth.default,
+                max_pages: taskConfig.max_pages.default,
+                qps_limit: taskConfig.qps_limit.default
             })
         });
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `HTTP ${res.status}`);
         alert(`已成功创建巡检任务！智能体已在后台全自动执行。`);
         openTaskDetailsView(data.id);
     } catch (e) {
@@ -363,7 +382,6 @@ function getAgentHTML() {
             </div>
             <div style="display:flex; gap:6px; flex-wrap:wrap; padding:8px 12px; background:#f8fafc; border-top:1px solid #e2e8f0;">
                 <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="sendQuickPrompt('对 http://127.0.0.1:8088 启动全量深度合规巡检，排查身份证与手机号泄露')">🎯 检查示范靶场 8088</button>
-                <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="sendQuickPrompt('检查 https://msgbox-merc.vercel.app/ 是否存在源码泄露与配置弱点')">🌐 检查 Vercel 站点</button>
                 <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="sendQuickPrompt('帮我排查目标网站有没有被黑客挂暗链或挖矿脚本')">⚠️ 查暗链和挂马</button>
                 <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="sendQuickPrompt('帮我比对最近两次巡检，看看修好了哪些漏洞')">⚖️ 比对历史巡检</button>
             </div>
@@ -404,7 +422,7 @@ function initAgentEvents() {
         const msgBox = document.getElementById('chat-messages');
         const traceBox = document.getElementById('agent-trace-box');
         
-        msgBox.innerHTML += `<div class="chat-msg msg-user">${text}</div>`;
+        msgBox.innerHTML += `<div class="chat-msg msg-user">${escapeHtml(text)}</div>`;
         msgBox.scrollTop = msgBox.scrollHeight;
         
         traceBox.innerHTML = `<p style="color:#0284c7;">⚡ 智能体正在解析自然语言意图，并自主编排安全探针工具...</p>`;
@@ -419,24 +437,24 @@ function initAgentEvents() {
             
             let traceHtml = `<h4 style="color:#0284c7; margin-bottom:10px;">📋 智能体生成的执行计划</h4><ol style="padding-left:20px; margin-bottom:16px;">`;
             (data.plan_steps || []).forEach(s => {
-                traceHtml += `<li><strong>${s.action}</strong>: ${s.description}</li>`;
+                traceHtml += `<li><strong>${escapeHtml(s.action)}</strong>: ${escapeHtml(s.description)}</li>`;
             });
             traceHtml += `</ol><h4 style="color:#0f172a; margin-bottom:10px;">🔍 思考与工具调用轨迹</h4>`;
             (data.execution_trace || []).forEach(t => {
                 traceHtml += `<div class="trace-step" style="background:#ffffff; border:1px solid #e2e8f0; border-radius:6px; padding:10px; margin-bottom:8px;">
-                    <div style="color:#0284c7; font-weight:600;">💭 思考: ${t.thought}</div>
-                    <div style="color:#b45309; margin-top:4px;">🛠️ 工具: <code>${t.tool}</code></div>
-                    <div style="color:#15803d; margin-top:4px;">👀 观测: ${t.observation}</div>
+                    <div style="color:#0284c7; font-weight:600;">💭 思考: ${escapeHtml(t.thought)}</div>
+                    <div style="color:#b45309; margin-top:4px;">🛠️ 工具: <code>${escapeHtml(t.tool)}</code></div>
+                    <div style="color:#15803d; margin-top:4px;">👀 观测: ${escapeHtml(t.observation)}</div>
                 </div>`;
             });
             traceBox.innerHTML = traceHtml;
             traceBox.scrollTop = traceBox.scrollHeight;
 
-            const formatted = data.response.replace(/\n/g, '<br>');
+            const formatted = escapeHtml(data.response || '').replace(/\n/g, '<br>');
             msgBox.innerHTML += `<div class="chat-msg msg-agent">${formatted}</div>`;
             msgBox.scrollTop = msgBox.scrollHeight;
         } catch (e) {
-            msgBox.innerHTML += `<div class="chat-msg msg-agent" style="border-color:#dc2626; color:#dc2626;">❌ 执行异常: ${e}</div>`;
+            msgBox.innerHTML += `<div class="chat-msg msg-agent" style="border-color:#dc2626; color:#dc2626;">❌ 执行异常: ${escapeHtml(e)}</div>`;
         }
     };
 
@@ -456,11 +474,11 @@ function getTasksHTML() {
             </div>
             <div class="form-group">
                 <label class="form-label">目标网站网址</label>
-                <input type="text" id="task-url" class="form-input" placeholder="http://127.0.0.1:8088" value="http://127.0.0.1:8088">
+                <input type="text" id="task-url" class="form-input" placeholder="输入已获授权的网站网址" value="">
             </div>
             <div class="form-group">
                 <label class="form-label">授权域名白名单 (逗号隔开)</label>
-                <input type="text" id="task-auth" class="form-input" placeholder="127.0.0.1, example.gov.cn" value="127.0.0.1">
+                <input type="text" id="task-auth" class="form-input" placeholder="例如：example.gov.cn, sub.example.gov.cn" value="">
             </div>
             <div class="form-group">
                 <label class="form-label">定时自动巡检预设</label>
@@ -483,7 +501,7 @@ function getTasksHTML() {
         </div>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
             <div style="font-size:12px; color:#64748b;">
-                🛡️ 安全合规保障：最大深度 3 层 | 抓取最多 50 页面 | 限速 5 QPS | 严格只读无害探测，绝不搞垮网站
+                🛡️ 安全合规保障：最大深度 3 层 | 抓取最多 100 页面 | 限速 5 QPS | 严格只读无害探测，绝不搞垮网站
             </div>
             <button class="btn btn-primary" onclick="createTask()">提交并开始检查</button>
         </div>
@@ -577,24 +595,25 @@ async function loadTasksTable() {
                 hasRunningTasks = true;
             }
             const score = t.summary ? (t.summary.security_score !== undefined ? t.summary.security_score : '--') : '--';
-            const cronText = t.cron_expr ? `<span class="tag tag-medium">⏰ ${t.cron_expr}</span>` : '<span style="color:#64748b; font-size:11px;">单次</span>';
+            const scoreColor = typeof score === 'number' ? (score < 60 ? '#dc2626' : (score < 85 ? '#d97706' : '#16a34a')) : '#64748b';
+            const cronText = t.cron_expr ? `<span class="tag tag-medium">⏰ ${escapeHtml(t.cron_expr)}</span>` : '<span style="color:#64748b; font-size:11px;">单次</span>';
             html += `<tr>
-                <td><strong>${t.name}</strong><br><span style="font-size:11px; color:#64748b;">${t.id}</span></td>
-                <td><code style="color:#0284c7; cursor:pointer;" onclick="openTaskDetailsView('${t.id}')">${t.target_url}</code></td>
+                <td><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:11px; color:#64748b;">${escapeHtml(t.id)}</span></td>
+                <td><code style="color:#0284c7; cursor:pointer;" onclick="openTaskDetailsView(${safeInlineArg(t.id)})">${escapeHtml(t.target_url)}</code></td>
                 <td>${cronText}</td>
-                <td><span class="tag ${t.status === 'COMPLETED' ? 'tag-low' : (t.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${t.status === 'COMPLETED' ? '已完成' : (t.status === 'RUNNING' ? '检查中' : t.status)}</span></td>
+                <td><span class="tag ${t.status === 'COMPLETED' ? 'tag-low' : (t.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${t.status === 'COMPLETED' ? '已完成' : (t.status === 'RUNNING' ? '检查中' : escapeHtml(t.status))}</span></td>
                 <td style="width:180px;">
-                    <div style="font-size:11px; color:#64748b;">${t.current_stage || ''} (${t.progress}%)</div>
+                    <div style="font-size:11px; color:#64748b;">${escapeHtml(t.current_stage || '')} (${escapeHtml(t.progress)}%)</div>
                     <div class="progress-bar"><div class="progress-val" style="width:${t.progress}%"></div></div>
                 </td>
-                <td><strong style="color:${score < 60 ? '#dc2626' : (score < 85 ? '#d97706' : '#16a34a')}">${score} 分</strong></td>
-                <td>${t.created_at.replace('T', ' ').substring(0, 19)}</td>
+                <td><strong style="color:${scoreColor}">${escapeHtml(score)} 分</strong></td>
+                <td>${escapeHtml((t.created_at || '').replace('T', ' ').substring(0, 19))}</td>
                 <td>
                     <div style="display:flex; gap:6px;">
-                        <button class="btn btn-primary" style="font-size:11px; padding:3px 8px;" onclick="openTaskDetailsView('${t.id}')">🔍 详情与报文</button>
-                        ${t.status === 'COMPLETED' ? `<button class="btn" style="font-size:11px; padding:3px 8px;" onclick="window.open('/api/v1/reports/${t.id}/html')">📄 浅色报告</button>` : ''}
-                        <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="rerunTask('${t.id}')">重新检查</button>
-                        <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626;" onclick="deleteTask('${t.id}')">删除</button>
+                        <button class="btn btn-primary" style="font-size:11px; padding:3px 8px;" onclick="openTaskDetailsView(${safeInlineArg(t.id)})">🔍 详情与报文</button>
+                        ${t.status === 'COMPLETED' ? `<button class="btn" style="font-size:11px; padding:3px 8px;" onclick="window.open(${safeInlineArg(`/api/v1/reports/${t.id}/html`)})">📄 浅色报告</button>` : ''}
+                        <button class="btn" style="font-size:11px; padding:3px 8px;" onclick="rerunTask(${safeInlineArg(t.id)})">重新检查</button>
+                        <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626;" onclick="deleteTask(${safeInlineArg(t.id)})">删除</button>
                     </div>
                 </td>
             </tr>`;
@@ -613,10 +632,12 @@ async function loadTasksTable() {
 
 async function createTask() {
     const name = document.getElementById('task-name').value.trim() || '巡检任务-' + new Date().toLocaleTimeString();
-    const url = document.getElementById('task-url').value.trim() || 'http://127.0.0.1:8088';
+    const url = document.getElementById('task-url').value.trim();
     const auth = document.getElementById('task-auth').value.split(',').map(s => s.trim()).filter(Boolean);
     const cron = document.getElementById('task-cron').value.trim();
     const keywords = (document.getElementById('task-keywords')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!url) return alert('请填写已获授权的目标 URL');
+    if (!auth.length) return alert('请至少填写一个已获授权的域名');
 
     try {
         const res = await fetch(`${API_BASE}/tasks`, {
@@ -628,12 +649,13 @@ async function createTask() {
                 auth_domains: auth,
                 cron_expr: cron,
                 custom_sensitive_keywords: keywords,
-                max_depth: 3,
-                max_pages: 50,
-                qps_limit: 5.0
+                max_depth: taskConfig.max_depth.default,
+                max_pages: taskConfig.max_pages.default,
+                qps_limit: taskConfig.qps_limit.default
             })
         });
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `HTTP ${res.status}`);
         alert('巡检任务创建成功！智能体正在后台全自动执行。');
         openTaskDetailsView(data.id);
     } catch (e) {
@@ -642,12 +664,15 @@ async function createTask() {
 }
 
 async function rerunTask(id) {
-    await fetch(`${API_BASE}/tasks/${id}/rerun`, { method: 'POST' });
-    if (currentDetailTaskId === id) {
-        refreshTaskDetailsLive();
-    } else {
-        loadTasksTable();
-    }
+    const res = await fetch(`${API_BASE}/tasks/${id}/rerun`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) return alert(`重新检查失败: ${data.detail || res.status}`);
+    if (data.task_id) openTaskDetailsView(data.task_id);
+    else loadTasksTable();
+}
+
+async function retestAllTask(id) {
+    await rerunTask(id);
 }
 
 async function deleteTask(id) {
@@ -723,13 +748,12 @@ async function refreshTaskDetailsLive() {
                 f.raw_request = reqStr;
                 
                 const respH = f.evidence?.response_headers || {};
-                const respStatus = f.evidence?.response_status || 200;
-                let respStr = `HTTP/1.1 ${respStatus} OK\r\n`;
+                const respStatus = f.evidence?.response_status;
+                let respStr = respStatus === undefined || respStatus === null
+                    ? '[未保存原始 HTTP 响应]\r\n'
+                    : `HTTP/1.1 ${respStatus}\r\n`;
                 for (const [k, v] of Object.entries(respH)) {
                     respStr += `${k}: ${v}\r\n`;
-                }
-                if (!f.evidence?.response_headers) {
-                    respStr += `Content-Type: text/html; charset=utf-8\r\nServer: WebServer\r\n`;
                 }
                 respStr += `\r\n${f.evidence?.matched_snippet || ''}`;
                 f.raw_response = respStr;
@@ -740,7 +764,7 @@ async function refreshTaskDetailsLive() {
                 findings_count: findings.length,
                 findings: findings,
                 sitemap_count: task.summary?.total_pages_scanned || 1,
-                sitemap: [{ url: task.target_url, title: task.name, status: 200, type: 'PAGE' }],
+                sitemap: [{ url: task.target_url, title: task.name, status: null, type: 'PAGE' }],
                 audit_logs: logs,
                 architecture: task.summary?.architecture || null
             };
@@ -760,81 +784,85 @@ async function refreshTaskDetailsLive() {
     }
 }
 
-// 保证无论何时都能渲染出完整的架构实例图
+// 根据任务快照渲染架构；接口降级时明确显示“未识别”，不填充猜测值。
 function getArchitectureData(task, sitemap, findings, serverArch) {
     if (serverArch && serverArch.layers && serverArch.layers.length > 0) {
         return serverArch;
     }
-    
+
+    // 旧任务或接口降级时只展示“未识别”，不按域名猜测框架、网关、数据库或 TLS 版本。
     const targetUrl = task ? (task.target_url || '') : '';
-    const isHttps = targetUrl.startsWith('https://');
-    const isVercel = targetUrl.includes('vercel.app') || targetUrl.includes('vercel');
-    const isLocalLab = targetUrl.includes('8088') || targetUrl.includes('127.0.0.1');
-    
-    let frontend = {
-        name: isVercel ? 'React 18 / Next.js 现代前端' : (isLocalLab ? '政企门户标准组件 (HTML5 / Bootstrap 5)' : '现代响应式 Web 前端 (Vue.js / HTML5)'),
-        version: isVercel ? 'React 18 (Next.js SSR/SPA)' : 'HTML5 / CSS3 / ES6+',
-        role: 'Client & Browser Presentation Tier',
-        icon: isVercel ? '⚛️' : '💻',
-        confidence: '96%',
-        color: '#0284c7',
-        category: '前端呈现层 (Frontend Tier)',
-        details: isVercel ? '采用组件化虚拟 DOM 与服务端渲染 (SSR) 混合架构，支持高效静态路由分发' : '采用标准 DOM 结构渲染与异步 Ajax/Fetch 接口数据通信'
-    };
-    
-    let webServer = {
-        name: isVercel ? 'Vercel Distributed Edge Network / CDN 网关' : (isLocalLab ? 'Uvicorn ASGI 高性能异步网关' : 'Nginx 1.24 企业级反向代理服务器'),
-        version: isVercel ? 'Cloud Edge Gateway' : (isLocalLab ? 'ASGI / HTTP 1.1' : 'Nginx 1.24.0 (Linux x86_64)'),
-        role: 'Web Server / Reverse Proxy & SSL Gateway',
-        icon: isVercel ? '▲' : '🌐',
-        confidence: '98%',
-        color: '#16a34a',
-        category: 'Web 网关层 (Gateway Tier)',
-        details: '负责网络请求反向代理转发、静态资源高效缓存、SSL/TLS 证书加解密与 DDoS 流量过滤'
-    };
-    
-    let backend = {
-        name: isVercel ? 'Node.js Serverless 运行时' : (isLocalLab ? 'Python 3.10+ (FastAPI 异步微服务)' : 'Java Spring Boot / Python 异步后端应用'),
-        version: isVercel ? 'Node.js 18+ (V8 Engine)' : (isLocalLab ? 'Python 3.14 (FastAPI ASGI)' : 'Spring Boot 3.x / Python 3.10+'),
-        role: 'Application Business Logic & REST APIs',
-        icon: isVercel ? '🟢' : (isLocalLab ? '🐍' : '⚙️'),
-        confidence: '94%',
-        color: '#8b5cf6',
-        category: '后端应用层 (Backend Tier)',
-        details: '处理核心业务鉴权逻辑、ORM 数据库模型映射、输入校验与 RESTful API 接口路由'
-    };
-    
-    let database = {
-        name: isLocalLab ? 'SQLite 3 嵌入式文件数据库' : (isVercel ? 'Cloud PostgreSQL / Redis 缓存集群' : 'MySQL 8.0 / PostgreSQL 关系型数据库'),
-        version: isLocalLab ? 'SQLite 3.x' : 'PostgreSQL 15 / Redis 7',
-        role: 'Database & Cache Storage Tier',
-        icon: '🗄️',
-        confidence: '92%',
-        color: '#f59e0b',
-        category: '数据存储层 (Database Tier)',
-        details: '存储业务持久化数据表、用户主体信息与高频会话 Session 缓存'
-    };
-    
-    let security = {
-        name: isHttps ? 'TLS 1.3 / HTTPS 传输层强加密防护' : 'HTTP/1.1 明文传输 (未配置强制加密传输)',
-        version: isHttps ? 'HTTPS / TLS 1.3 加密' : 'HTTP 明文传输 (待整改)',
-        role: 'Security Defense & Access Boundary Tier',
-        icon: '🛡️',
-        confidence: '98%',
-        color: isHttps ? '#16a34a' : '#dc2626',
-        category: '安全防护层 (Security Tier)',
-        details: isHttps ? '通信全链路 HTTPS 加密保护 | HSTS 策略基线核验 | CORS 跨域安全边界防御' : '当前目标站点未启用 HTTPS 强制加密，传输存在被中间人窃听风险，建议配置 SSL/TLS 证书'
-    };
-    
+    let targetHost = targetUrl;
+    try { targetHost = new URL(targetUrl).hostname || targetUrl; } catch (e) { /* 保留原始值 */ }
     return {
-        target_host: task ? task.target_url : '',
-        layers: [
-            { id: "tier-1", title: "① 客户端与前端呈现层", role: "Frontend Presentation Tier", component: frontend },
-            { id: "tier-2", title: "② Web 网关与反向代理层", role: "Web Server & Gateway Tier", component: webServer },
-            { id: "tier-3", title: "③ 业务逻辑与后端应用层", role: "Backend Application Tier", component: backend },
-            { id: "tier-4", title: "④ 数据持久化与存储层", role: "Database & Storage Tier", component: database },
-            { id: "tier-5", title: "⑤ 安全防护与边界防御", role: "Security & Access Boundary Tier", component: security }
-        ]
+        target_host: targetHost,
+        target_url: targetUrl,
+        analyzed_pages_count: Array.isArray(sitemap) ? sitemap.length : 0,
+        layers: [],
+        cpe_candidates: [],
+        fingerprint_policy: 'EVIDENCE_ONLY',
+        evidence_note: '当前任务未保存足够的响应指纹，未对技术栈进行猜测。'
+    };
+}
+
+// 只根据后端保存的架构指纹和巡检资产绘制拓扑；未知组件明确标记为未识别。
+function generateObservedTopology(task, sitemap, findings, architecture) {
+    const layers = Array.isArray(architecture?.layers) ? architecture.layers : [];
+    const ids = ['frontend', 'cdn', 'backend', 'db', 'auth'];
+    const positions = [
+        [180, 170], [420, 170], [660, 170], [900, 170], [1140, 170]
+    ];
+    const nodes = [{
+        id: 'user',
+        title: '🧑 授权巡检访问端',
+        subTitle: 'Observed Request Origin',
+        tech: 'HTTP(S) 客户端',
+        desc: '由本系统在授权范围内发起受限、可审计的巡检请求。',
+        svgX: 60, svgY: 170,
+        details: {
+            framework: '未识别', protocol: 'HTTP/HTTPS', assets: '巡检请求',
+            securityPolicy: '授权域名白名单与限速', threatSurface: '请求边界由任务授权配置决定',
+            hardening: '仅对明确授权的域名执行巡检。', compliance: '授权测试与最小权限原则。'
+        }
+    }];
+    ids.forEach((id, index) => {
+        const layer = layers[index] || {};
+        const component = layer.component || {};
+        const detected = component.detected === true;
+        const name = component.name || '未识别组件';
+        const version = component.version || '版本未知';
+        const evidence = Array.isArray(component.evidence) ? component.evidence : [];
+        const position = positions[index];
+        nodes.push({
+            id,
+            title: `${layer.title || `第 ${index + 1} 层`} · ${name}`,
+            subTitle: layer.role || 'Observed Architecture Layer',
+            tech: detected ? `${name}${version && version !== '版本未知' ? ` ${version}` : ''}` : '未识别（证据不足）',
+            desc: component.details || '未获得可复核的组件识别证据。',
+            svgX: position[0], svgY: position[1],
+            details: {
+                framework: detected ? name : '未识别',
+                protocol: '未观测',
+                assets: `${Array.isArray(sitemap) ? sitemap.length : 0} 个已发现页面/资产`,
+                securityPolicy: detected ? `识别置信度 ${component.confidence || '未知'}` : '未观测到可复核指纹',
+                threatSurface: `${Array.isArray(findings) ? findings.length : 0} 项巡检发现关联到当前任务`,
+                hardening: '请基于响应证据、风险详情与复测结果制定加固措施。',
+                compliance: '当前拓扑仅反映已观测证据，不替代资产台账或人工架构确认。',
+                evidence
+            }
+        });
+    });
+    const edges = ids.map((id, index) => ({
+        from: index === 0 ? 'user' : ids[index - 1],
+        to: id,
+        key: `${index === 0 ? 'user' : ids[index - 1]}-${id}`,
+        label: index === 0 ? '授权 HTTP(S) 请求' : '观测层级关联（示意）'
+    }));
+    return {
+        profileType: 'OBSERVED_EVIDENCE',
+        profileTitle: '基于巡检证据的观测拓扑（未知组件不猜测）',
+        nodes,
+        edges
     };
 }
 
@@ -1194,7 +1222,7 @@ function generateSiteAdaptiveTopology(task, sitemap, findings) {
     return { profileType, profileTitle, nodes, edges };
 }
 
-function getVulnerabilityAttackProcess(activeVuln) {
+function getVulnerabilityAttackProcessLegacy(activeVuln) {
     if (!activeVuln) {
         return {
             title: '全站健康安全运转链路 (未检出已知漏洞)',
@@ -1278,7 +1306,34 @@ function getVulnerabilityAttackProcess(activeVuln) {
     }
 }
 
-function getNodeAttackBehavior(nodeId, activeVuln) {
+// 证据型风险流程：只展示已观测请求、证据、影响研判与复测步骤，不把推测渲染成已发生的攻击。
+function getVulnerabilityAttackProcess(activeVuln) {
+    if (!activeVuln) {
+        return {
+            title: '巡检证据与安全边界链路（当前无风险发现）',
+            steps: [
+                { num: 1, tier: '🧑 访问端', action: '发起授权巡检请求', desc: '请求仅来自任务配置的授权域名与范围。' },
+                { num: 2, tier: '🌐 目标站点', action: '保存页面与响应证据', desc: '记录可达页面、资源和安全响应特征。' },
+                { num: 3, tier: '🔍 检测规则', action: '执行当前启用规则', desc: '按任务策略检查漏洞、篡改和敏感信息。' },
+                { num: 4, tier: '📄 报告闭环', action: '生成基线与复测入口', desc: '结果可追踪、可复测，不代表对未覆盖风险作保证。' }
+            ]
+        };
+    }
+    const verified = activeVuln.verified === 1 || activeVuln.verified === true;
+    const evidenceState = verified ? '已取得响应证据' : '证据不足，待复核';
+    const target = activeVuln.url || '当前任务目标';
+    return {
+        title: `风险证据链：${activeVuln.title || '未命名发现'}（${evidenceState}）`,
+        steps: [
+            { num: 1, tier: '🧑 Step 1: 授权请求', action: '发送受限探测请求', desc: `目标：${target}` },
+            { num: 2, tier: '🌐 Step 2: 响应观测', action: '保存状态、头部与内容片段', desc: '只使用任务中实际取得的响应证据。' },
+            { num: 3, tier: '🔍 Step 3: 风险研判', action: verified ? '证据支持当前风险判断' : '保留为疑似风险并提示人工复核', desc: '影响范围是基于当前证据的研判，不等同于已完成攻击。' },
+            { num: 4, tier: '🛠️ Step 4: 整改复测', action: '给出修复建议并支持复测', desc: '修复后使用同一风险记录复测，失败时不自动判定为已修复。' }
+        ]
+    };
+}
+
+function getNodeAttackBehaviorLegacy(nodeId, activeVuln) {
     if (!activeVuln) {
         return {
             status: 'safe',
@@ -1550,6 +1605,7 @@ function renderBurpScannerLayout(data) {
     const architecture = getArchitectureData(task, sitemap, displayFindings, data.architecture);
     const summary = task.summary || {};
     const score = summary.security_score !== undefined ? summary.security_score : '--';
+    const scoreColor = typeof score === 'number' ? (score < 60 ? '#dc2626' : (score < 85 ? '#d97706' : '#16a34a')) : '#64748b';
     
     const currentFinding = displayFindings[selectedFindingIndex] || displayFindings[0] || null;
 
@@ -1560,7 +1616,7 @@ function renderBurpScannerLayout(data) {
             <div style="display:flex; align-items:center; gap:8px; font-size:13px; color:#1e40af;">
                 <span style="font-size:16px;">🎯</span>
                 <div>
-                    <strong>当前正聚焦查看单页面拓扑与漏洞：</strong> <code style="background:#dbeafe; color:#1e3a8a; padding:2px 6px; border-radius:4px;">${focusPageUrl}</code> (共 ${displayFindings.length} 处漏洞)
+                    <strong>当前正聚焦查看单页面拓扑与漏洞：</strong> <code style="background:#dbeafe; color:#1e3a8a; padding:2px 6px; border-radius:4px;">${escapeHtml(focusPageUrl)}</code> (共 ${displayFindings.length} 处漏洞)
                 </div>
             </div>
             <button class="btn btn-primary" style="font-size:11px; padding:3px 10px;" onclick="clearFocusPage()">🔄 返回查看整站全部漏洞 (${allFindings.length})</button>
@@ -1575,25 +1631,25 @@ function renderBurpScannerLayout(data) {
             <div>
                 <div style="display:flex; align-items:center; gap:10px;">
                     <button class="btn" style="padding:4px 10px; font-size:12px;" onclick="currentDetailTaskId=null; renderTabContent('tasks')">← 返回任务列表</button>
-                    <h3 style="font-size:16px; color:#0f172a; margin:0;">${task.name}</h3>
-                    <span class="tag ${task.status === 'COMPLETED' ? 'tag-low' : (task.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${task.status === 'COMPLETED' ? '已完成' : task.status}</span>
+                    <h3 style="font-size:16px; color:#0f172a; margin:0;">${escapeHtml(task.name)}</h3>
+                    <span class="tag ${task.status === 'COMPLETED' ? 'tag-low' : (task.status === 'RUNNING' ? 'tag-medium' : 'tag-info')}">${task.status === 'COMPLETED' ? '已完成' : escapeHtml(task.status)}</span>
                 </div>
                 <div style="display:flex; gap:16px; font-size:12px; color:#64748b; margin-top:8px; align-items:center; flex-wrap:wrap;">
-                    <span>📍 目标网站: <code style="color:#0284c7;">${task.target_url}</code></span>
-                    <span>🕒 时间: ${task.created_at.substring(0, 19).replace('T', ' ')}</span>
-                    <span>🛡️ 安全健康分: <strong style="color:${score < 60 ? '#dc2626' : (score < 85 ? '#d97706' : '#16a34a')}">${score} 分</strong></span>
+                    <span>📍 目标网站: <code style="color:#0284c7;">${escapeHtml(task.target_url)}</code></span>
+                    <span>🕒 时间: ${escapeHtml((task.created_at || '').substring(0, 19).replace('T', ' '))}</span>
+                    <span>🛡️ 安全健康分: <strong style="color:${scoreColor}">${escapeHtml(score)} 分</strong></span>
                     <span>🐞 检出问题: <strong>${displayFindings.length}</strong> 项 ${focusPageUrl ? '(单页聚焦)' : ''}</span>
                     <span>🌐 探测页面: <strong>${sitemap.length}</strong> 个节点</span>
                 </div>
                 <div style="width:300px; margin-top:6px;">
                     <div class="progress-bar"><div class="progress-val" style="width:${task.progress}%"></div></div>
-                    <div style="font-size:11px; color:#64748b; margin-top:2px;">${task.current_stage || ''} (${task.progress}%)</div>
+                    <div style="font-size:11px; color:#64748b; margin-top:2px;">${escapeHtml(task.current_stage || '')} (${escapeHtml(task.progress)}%)</div>
                 </div>
             </div>
 
             <div style="display:flex; gap:8px;">
-                <button class="btn btn-primary" onclick="retestAllTask('${task.id}')">⚡ 一键整站重新探测与复测</button>
-                <button class="btn" onclick="window.open('/api/v1/reports/${task.id}/html')">📄 查看浅色评估报告</button>
+                <button class="btn btn-primary" onclick="retestAllTask(${safeInlineArg(task.id)})">⚡ 一键整站重新探测与复测</button>
+                <button class="btn" onclick="window.open(${safeInlineArg(`/api/v1/reports/${task.id}/html`)})">📄 查看浅色评估报告</button>
             </div>
         </div>
 
@@ -1622,8 +1678,8 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             return `
             <div class="card" style="padding:40px; text-align:center;">
                 <div style="font-size:40px; margin-bottom:10px;">🎉</div>
-                <h3 style="color:#16a34a; font-size:18px;">目标站点暂未发现任何安全漏洞</h3>
-                <p style="color:#64748b; font-size:13px; margin-top:4px;">所有测试页面与探测均符合政企安全基线与法规要求。</p>
+                <h3 style="color:#16a34a; font-size:18px;">当前启用检测项未返回安全发现</h3>
+                <p style="color:#64748b; font-size:13px; margin-top:4px;">该结论仅覆盖本次授权范围、已执行规则和可达页面，不代表目标不存在其他风险。</p>
             </div>`;
         }
 
@@ -1643,13 +1699,13 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             issuesListHtml += `
             <div class="burp-issue-item ${isSelected}" onclick="selectFinding(${idx})">
                 <div class="burp-issue-title">
-                    <span class="tag tag-${sevClass}" style="font-size:10px; padding:1px 5px;">${f.severity}</span>
+                    <span class="tag tag-${escapeHtml(sevClass)}" style="font-size:10px; padding:1px 5px;">${escapeHtml(f.severity)}</span>
                     <span class="tag tag-${isSrcExploitable ? 'critical' : 'info'}" style="font-size:9px; padding:0 4px;">${isSrcExploitable ? '🎯 SRC' : '📋 基线'}</span>
-                    <span style="font-size:12px; font-weight:600; color:#0f172a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.title}</span>
+                    <span style="font-size:12px; font-weight:600; color:#0f172a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.title)}</span>
                 </div>
                 <div class="burp-issue-meta">
-                    <span>${f.url}</span>
-                    <span class="tag ${f.status === 'OPEN' ? 'tag-high' : 'tag-low'}" style="font-size:9px; padding:0 4px;">${f.status === 'OPEN' ? '待处理' : '已修复'}</span>
+                    <span>${escapeHtml(f.url)}</span>
+                    <span class="tag ${f.status === 'OPEN' ? 'tag-high' : 'tag-low'}" style="font-size:9px; padding:0 4px;">${f.status === 'OPEN' ? '待处理' : escapeHtml(f.status)}</span>
                 </div>
             </div>
             `;
@@ -1660,7 +1716,7 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             if (currentHttpViewTab === 'request') {
                 httpContent = currentFinding.raw_request || `GET / HTTP/1.1\r\nHost: ${task.target_url}\r\nUser-Agent: DAS-SentinelAgent/1.0\r\nAccept: */*\r\n`;
             } else if (currentHttpViewTab === 'response') {
-                httpContent = currentFinding.raw_response || `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n[DAS-Observer]: 页面正常响应。`;
+                httpContent = currentFinding.raw_response || '[未保存原始 HTTP 响应]';
             } else {
                 httpContent = JSON.stringify(currentFinding.evidence || {}, null, 2);
             }
@@ -1683,18 +1739,18 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                     ${currentFinding ? `
                         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                             <div>
-                                <span class="tag tag-${currentFinding.severity.toLowerCase()}">${currentFinding.severity}</span> 
+                                <span class="tag tag-${escapeHtml(currentFinding.severity.toLowerCase())}">${escapeHtml(currentFinding.severity)}</span>
                                 <span class="tag tag-${isCurrentSrc ? 'critical' : 'info'}" style="font-size:11px; padding:2px 7px; margin-left:4px;">${isCurrentSrc ? '🎯 行业 SRC 实战收录漏洞' : '📋 安全配置基线建议 (SRC 忽略项)'}</span>
-                                <span style="font-size:15px; font-weight:700; margin-left:6px;">${currentFinding.title}</span>
+                                <span style="font-size:15px; font-weight:700; margin-left:6px;">${escapeHtml(currentFinding.title)}</span>
                             </div>
                             <div style="display:flex; gap:6px;">
-                                <button class="btn" style="background:#f0f9ff; color:#0284c7; border-color:#bae6fd; font-size:11px; padding:3px 10px;" onclick="window.jumpToTopologyWithFinding(${selectedFindingIndex})">🏛️ 在拓扑图中定位攻击链</button>
-                                <button class="btn btn-primary" style="font-size:11px; padding:3px 10px;" onclick="retestSingleFindingLive('${currentFinding.id}')">⚡ 一键复测</button>
+                                <button class="btn" style="background:#f0f9ff; color:#0284c7; border-color:#bae6fd; font-size:11px; padding:3px 10px;" onclick="window.jumpToTopologyWithFinding(${selectedFindingIndex})">🏛️ 在拓扑图中定位风险来源</button>
+                                <button class="btn btn-primary" style="font-size:11px; padding:3px 10px;" onclick="retestSingleFindingLive(${safeInlineArg(currentFinding.id)})">⚡ 一键复测</button>
                             </div>
                         </div>
-                        <p style="font-size:12px; color:#475569; margin-top:8px; line-height:1.5;">${currentFinding.impact || '该漏洞可能造成未经授权的信息泄露或业务风险。'}</p>
-                        <div style="margin-top:4px; font-size:12px; color:#0284c7;"><strong>URL:</strong> <code>${currentFinding.url || ''}</code></div>
-                        ${currentFinding.remediation ? `<div style="margin-top:4px; font-size:12px; color:#16a34a;"><strong>🛠️ 加固建议:</strong> ${currentFinding.remediation}</div>` : ''}
+                        <p style="font-size:12px; color:#475569; margin-top:8px; line-height:1.5;">${escapeHtml(currentFinding.impact || '该漏洞可能造成未经授权的信息泄露或业务风险。')}</p>
+                        <div style="margin-top:4px; font-size:12px; color:#0284c7;"><strong>URL:</strong> <code>${escapeHtml(currentFinding.url || '')}</code></div>
+                        ${currentFinding.remediation ? `<div style="margin-top:4px; font-size:12px; color:#16a34a;"><strong>🛠️ 加固建议:</strong> ${escapeHtml(currentFinding.remediation)}</div>` : ''}
                     ` : '请在左侧列表中选择一个安全问题以查看详情与通信报文'}
                 </div>
                 <div class="burp-http-card" style="margin-top:10px; background:#fff; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden;">
@@ -1710,8 +1766,8 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
         `;
 
     } else if (currentBurpSubTab === 'sitemap') {
-        // 1. 根据目标网站指纹动态生成自适应架构拓扑 (Site-Adaptive Topology Profile)
-        const siteTopo = generateSiteAdaptiveTopology(task, sitemap, findings);
+        // 1. 根据后端保存的响应指纹生成观测拓扑；不按域名猜测内部组件。
+        const siteTopo = generateObservedTopology(task, sitemap, findings, architecture);
         const nodes = siteTopo.nodes;
         const edges = siteTopo.edges;
 
@@ -1780,6 +1836,12 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 impactAnalysisText = '⚠️ 安全基线配置提示：存在响应标头或传输层弱配置项。';
             }
 
+            // 统一将影响描述限定为当前观测和研判，避免把潜在影响渲染为已经完成的攻击。
+            const evidenceState = activeVuln.verified === 1 || activeVuln.verified === true
+                ? '已取得响应证据'
+                : '证据不足，待人工复核';
+            impactAnalysisText = `${evidenceState}：${activeVuln.impact || '当前发现可能带来安全风险，请结合证据详情评估影响范围。'}（不代表已完成攻击或数据已被获取）`;
+
             // 🎯 自动将受到波及的相邻节点间的所有连线标记为红色攻击渗透链路 (保证全链路端到端完全贯通连线)
             edges.forEach(e => {
                 if (affectedNodeIds.has(e.from) && affectedNodeIds.has(e.to)) {
@@ -1795,11 +1857,11 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             attackStepsHtml += `
             <div class="attack-step-node">
                 <div class="attack-step-header">
-                    <span class="attack-step-num">Step ${st.num}</span>
-                    <span class="attack-step-tier">${st.tier}</span>
+                    <span class="attack-step-num">Step ${escapeHtml(st.num)}</span>
+                    <span class="attack-step-tier">${escapeHtml(st.tier)}</span>
                 </div>
-                <div class="attack-step-action">${st.action}</div>
-                <div class="attack-step-desc">${st.desc}</div>
+                <div class="attack-step-action">${escapeHtml(st.action)}</div>
+                <div class="attack-step-desc">${escapeHtml(st.desc)}</div>
             </div>
             `;
             if (sIdx < attackFlow.steps.length - 1) {
@@ -1873,10 +1935,10 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             <g transform="translate(${midX}, ${midY})">
                 ${isAffected ? `
                     <rect x="${-labelW/2}" y="-10" width="${labelW}" height="20" rx="4" fill="#fee2e2" stroke="#dc2626" stroke-width="1.2" />
-                    <text x="0" y="3.8" text-anchor="middle" font-size="10.5" font-weight="700" fill="#dc2626">${labelText}</text>
+                    <text x="0" y="3.8" text-anchor="middle" font-size="10.5" font-weight="700" fill="#dc2626">${escapeHtml(labelText)}</text>
                 ` : `
                     <rect x="${-labelW/2}" y="-9" width="${labelW}" height="18" rx="3" fill="#ffffff" fill-opacity="0.96" stroke="#cbd5e1" stroke-width="0.8" />
-                    <text x="0" y="3.5" text-anchor="middle" font-size="10" font-weight="500" fill="#475569">${labelText}</text>
+                    <text x="0" y="3.5" text-anchor="middle" font-size="10" font-weight="500" fill="#475569">${escapeHtml(labelText)}</text>
                 `}
             </g>
             `;
@@ -1899,10 +1961,10 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             }
             if (isRoot) {
                 nodeClass += ' node-affected node-root-cause';
-                statusBadge = '<span class="tag tag-critical" style="font-size:9.5px; padding:1px 5px;">💥 漏洞源头</span>';
+                statusBadge = '<span class="tag tag-critical" style="font-size:9.5px; padding:1px 5px;">💥 风险来源</span>';
             } else if (isAffected) {
                 nodeClass += ' node-affected';
-                statusBadge = '<span class="tag tag-high" style="font-size:9.5px; padding:1px 5px;">🚨 攻击波及</span>';
+                statusBadge = '<span class="tag tag-high" style="font-size:9.5px; padding:1px 5px;">🚨 潜在影响</span>';
             }
 
             const xPct = ((n.svgX / 1200) * 100).toFixed(2);
@@ -1910,18 +1972,18 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
 
             let attackBadgeHtml = '';
             if (isRoot) {
-                attackBadgeHtml = `<div class="node-attack-badge badge-root" style="font-size:9.5px; padding:2px 5px; margin-top:3px;">💥 漏洞源头: ${atk.role}</div>`;
+                attackBadgeHtml = `<div class="node-attack-badge badge-root" style="font-size:9.5px; padding:2px 5px; margin-top:3px;">💥 漏洞源头: ${escapeHtml(atk.role)}</div>`;
             } else if (isAffected) {
-                attackBadgeHtml = `<div class="node-attack-badge badge-affected" style="font-size:9.5px; padding:2px 5px; margin-top:3px;">🚨 渗透波及: ${atk.role}</div>`;
+                attackBadgeHtml = `<div class="node-attack-badge badge-affected" style="font-size:9.5px; padding:2px 5px; margin-top:3px;">🚨 渗透波及: ${escapeHtml(atk.role)}</div>`;
             }
 
             nodesHtml += `
-            <div class="${nodeClass}" style="left:${xPct}%; top:${yPx}px; z-index:20;" onclick="window.toggleTopologyNodeDetail('${n.id}')" title="${n.title} - 点击展开深度详情">
+            <div class="${nodeClass}" style="left:${xPct}%; top:${yPx}px; z-index:20;" onclick="window.toggleTopologyNodeDetail(${safeInlineArg(n.id)})" title="${escapeHtml(n.title)} - 点击展开深度详情">
                 <div class="topo-node-header">
-                    <div class="topo-node-title">${n.title}</div>
+                    <div class="topo-node-title">${escapeHtml(n.title)}</div>
                     ${statusBadge}
                 </div>
-                <div class="topo-node-tech" title="${n.tech}">${n.tech}</div>
+                <div class="topo-node-tech" title="${escapeHtml(n.tech)}">${escapeHtml(n.tech)}</div>
                 ${attackBadgeHtml}
             </div>
             `;
@@ -1940,42 +2002,42 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             <div class="topo-node-detail-panel">
                 <div class="topo-detail-header">
                     <div class="topo-detail-title">
-                        <span style="font-size:16px; font-weight:800; color:#0f172a;">${selNode.title} · 深度架构大卡片</span>
+                        <span style="font-size:16px; font-weight:800; color:#0f172a;">${escapeHtml(selNode.title)} · 深度架构大卡片</span>
                     </div>
-                    <button class="btn btn-primary" style="padding:4px 10px; font-size:12px;" onclick="window.toggleTopologyNodeDetail('${selNode.id}')">✕ 关闭大卡片</button>
+                    <button class="btn btn-primary" style="padding:4px 10px; font-size:12px;" onclick="window.toggleTopologyNodeDetail(${safeInlineArg(selNode.id)})">✕ 关闭大卡片</button>
                 </div>
 
                 <div class="topo-detail-badge-group">
-                    <span class="tag" style="background:#f1f5f9; color:#475569; font-size:11px;">${selNode.subTitle}</span>
+                    <span class="tag" style="background:#f1f5f9; color:#475569; font-size:11px;">${escapeHtml(selNode.subTitle)}</span>
                     <span class="tag ${isRoot ? 'tag-critical' : (isAffected ? 'tag-high' : 'tag-low')}" style="font-size:11px;">
-                        ${isRoot ? '💥 漏洞源头组件' : (isAffected ? '🚨 受攻击波及组件' : '🟢 安全基线合规')}
+                        ${isRoot ? '💥 风险来源组件' : (isAffected ? '🚨 潜在影响组件' : '🟢 未关联发现')}
                     </span>
                 </div>
 
                 <!-- 💥 当前漏洞下本组件的渗透与危害表现 -->
                 <div class="topo-detail-section" style="background:${isRoot ? '#fee2e2' : (isAffected ? '#fff1f2' : '#f0fdf4')}; border-color:${isRoot ? '#f87171' : (isAffected ? '#fecdd3' : '#bbf7d0')};">
-                    <h5 style="color:${isRoot ? '#991b1b' : (isAffected ? '#b91c1c' : '#15803d')};">⚔️ 本次漏洞注入后本组件的表现与影响</h5>
-                    <p><strong>状态判定：</strong> <span style="font-weight:700;">${curAtk.role}</span></p>
-                    <p><strong>攻击行为还原：</strong> ${curAtk.text}</p>
+                    <h5 style="color:${isRoot ? '#991b1b' : (isAffected ? '#b91c1c' : '#15803d')};">🔍 当前风险在本组件上的观测与影响研判</h5>
+                    <p><strong>状态判定：</strong> <span style="font-weight:700;">${escapeHtml(curAtk.role)}</span></p>
+                    <p><strong>攻击行为还原：</strong> ${escapeHtml(curAtk.text)}</p>
                 </div>
 
                 <!-- 1. 技术栈与架构环境 -->
                 <div class="topo-detail-section">
                     <h5>⚙️ 核心技术栈与通信协议</h5>
-                    <p><strong>组件架构：</strong> <code>${d.framework || selNode.tech}</code></p>
-                    <p><strong>协议标准：</strong> <code>${d.protocol || 'TCP / HTTP'}</code></p>
-                    <p><strong>功能定位：</strong> ${selNode.desc}</p>
-                    <p><strong>核心资产：</strong> <span style="color:#0284c7;">${d.assets || '业务核心组件与配置文件'}</span></p>
+                    <p><strong>组件架构：</strong> <code>${escapeHtml(d.framework || selNode.tech)}</code></p>
+                    <p><strong>协议标准：</strong> <code>${escapeHtml(d.protocol || 'TCP / HTTP')}</code></p>
+                    <p><strong>功能定位：</strong> ${escapeHtml(selNode.desc)}</p>
+                    <p><strong>核心资产：</strong> <span style="color:#0284c7;">${escapeHtml(d.assets || '业务核心组件与配置文件')}</span></p>
                 </div>
 
                 <!-- 2. 安全策略与风险态势 -->
                 <div class="topo-detail-section" style="${isAffected ? 'background:#fff1f2; border-color:#fecdd3;' : ''}">
                     <h5 style="${isAffected ? 'color:#991b1b;' : ''}">🛡️ 安全防护策略与风险暴露面</h5>
-                    <p><strong>防护机制：</strong> ${d.securityPolicy}</p>
-                    <p><strong>潜在威胁：</strong> <span style="color:#b45309;">${d.threatSurface}</span></p>
+                    <p><strong>防护机制：</strong> ${escapeHtml(d.securityPolicy)}</p>
+                    <p><strong>潜在威胁：</strong> <span style="color:#b45309;">${escapeHtml(d.threatSurface)}</span></p>
                     ${isAffected ? `
                         <div style="background:#fee2e2; border:1px solid #f87171; border-radius:4px; padding:6px 10px; margin-top:8px; color:#991b1b; font-weight:600;">
-                            🚨 动态研判警报：当前选中的漏洞 [${activeVuln ? activeVuln.title : ''}] 直接波及此节点，存在被黑客作为跳板或窃取数据的严重风险！
+                            🚨 动态研判警报：当前选中的漏洞 [${escapeHtml(activeVuln ? activeVuln.title : '')}] 直接波及此节点，存在被黑客作为跳板或窃取数据的严重风险！
                         </div>
                     ` : '<div style="margin-top:6px; color:#16a34a; font-weight:600;">✔ 当前巡检未发现直接波及该组件的高危暴露隐患。</div>'}
                 </div>
@@ -1983,13 +2045,13 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 <!-- 3. 专家加固配置 -->
                 <div class="topo-detail-section" style="background:#f0fdf4; border-color:#bbf7d0;">
                     <h5 style="color:#15803d;">🛠️ 专家推荐安全加固与配置指引</h5>
-                    <p style="color:#166534; line-height:1.6;">${d.hardening}</p>
+                    <p style="color:#166534; line-height:1.6;">${escapeHtml(d.hardening)}</p>
                 </div>
 
                 <!-- 4. 法规与合规依据 -->
                 <div class="topo-detail-section" style="background:#f8fafc; border-color:#e2e8f0;">
                     <h5 style="color:#4f46e5;">⚖️ 等保 2.0 与法律法规合规要求</h5>
-                    <p style="color:#4338ca;">${d.compliance || '符合《网络安全法》与《数据安全法》安全合规基线。'}</p>
+                    <p style="color:#4338ca;">${escapeHtml(d.compliance || '请依据本单位适用的法规和安全基线复核。')}</p>
                 </div>
 
                 <div style="font-size:11px; color:#64748b; text-align:center; margin-top:4px;">
@@ -2026,8 +2088,8 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 const countBadge = g.indices.length > 1 ? `<span style="background:rgba(0,0,0,0.07); padding:1px 6px; border-radius:10px; font-size:10px; font-weight:700; margin-left:4px;">共 ${g.indices.length} 处端点</span>` : '';
                 pillsHtml += `
                 <button class="topo-vuln-pill ${isAct ? 'active' : ''}" onclick="selectTopologyVuln(${g.firstIndex})" title="${escapeHtml(g.title)} (影响 ${g.indices.length} 处资源)">
-                    <span class="tag tag-${g.severity.toLowerCase()}" style="font-size:10px; padding:1px 4px;">${g.severity}</span>
-                    <span>${groupIndex}. ${g.title}</span>
+                    <span class="tag tag-${escapeHtml(g.severity.toLowerCase())}" style="font-size:10px; padding:1px 4px;">${escapeHtml(g.severity)}</span>
+                    <span>${groupIndex}. ${escapeHtml(g.title)}</span>
                     ${countBadge}
                 </button>
                 `;
@@ -2036,7 +2098,7 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             vulnSelectorHtml = `
             <div class="topo-vuln-bar">
                 <div style="font-size:12px; font-weight:700; color:#0f172a; margin-right:4px; white-space:nowrap;">
-                    🎯 专项漏洞深度利用链 (已智能聚合为 ${groupedVulnsMap.size} 类 / 共 ${highImpactFindings.length} 处隐患)：
+                    🎯 风险证据关联 (已智能聚合为 ${groupedVulnsMap.size} 类 / 共 ${highImpactFindings.length} 处隐患)：
                 </div>
                 ${pillsHtml}
                 ${complianceHeaders.length > 0 ? `
@@ -2046,13 +2108,13 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 ` : ''}
             </div>
 
-            <!-- ⚔️ 漏洞利用链路与攻击渗透全过程可视化条 -->
+            <!-- 风险证据、影响研判与复测流程可视化条 -->
             <div class="attack-process-card">
                 <div class="attack-process-header">
                     <div class="attack-process-title">
-                        <span>⚔️ 漏洞攻击与渗透利用全过程链路 (Exploit Progression Flow)</span>
+                        <span>🔍 风险证据与复测流程 (Evidence & Retest Flow)</span>
                     </div>
-                    <span class="tag tag-critical" style="font-size:10px;">${activeVuln ? activeVuln.title : '安全运行'}</span>
+                    <span class="tag tag-critical" style="font-size:10px;">${escapeHtml(activeVuln ? activeVuln.title : '安全运行')}</span>
                 </div>
                 <div class="attack-steps-container">
                     ${attackStepsHtml}
@@ -2062,7 +2124,7 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             <div style="background:#fff1f2; border:1px solid #fecdd3; border-radius:6px; padding:10px 14px; margin:10px 14px 0 14px; font-size:12px; color:#991b1b; display:flex; align-items:center; gap:8px;">
                 <span style="font-size:16px;">🚨</span>
                 <div>
-                    <strong>当前选中的漏洞：</strong> [${activeVuln.severity}] ${activeVuln.title} (<code>${activeVuln.url}</code>)<br>
+                    <strong>当前选中的漏洞：</strong> [${escapeHtml(activeVuln.severity)}] ${escapeHtml(activeVuln.title)} (<code>${escapeHtml(activeVuln.url)}</code>)<br>
                     <span style="color:#b91c1c;">${impactAnalysisText}</span>
                 </div>
             </div>
@@ -2074,8 +2136,8 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 const sev = f.severity || 'LOW';
                 pillsHtml += `
                 <button class="topo-vuln-pill ${isAct}" onclick="selectTopologyVuln(${fIdx})">
-                    <span class="tag tag-${sev.toLowerCase()}" style="font-size:10px; padding:1px 4px;">${sev}</span>
-                    <span>${fIdx + 1}. ${f.title}</span>
+                    <span class="tag tag-${escapeHtml(sev.toLowerCase())}" style="font-size:10px; padding:1px 4px;">${escapeHtml(sev)}</span>
+                    <span>${fIdx + 1}. ${escapeHtml(f.title)}</span>
                 </button>
                 `;
             });
@@ -2085,7 +2147,7 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span style="font-size:18px;">🛡️</span>
                     <div>
-                        <strong>目标站点未检出高危渗透漏洞或攻击链</strong> (系统具备较强安全基线)，全链路 10 个节点处于健康运转状态。
+                        <strong>当前检测范围内未检出高危渗透漏洞或攻击链</strong>。该结论不代表目标不存在其他风险。
                         <div style="font-size:12px; color:#475569; margin-top:2px;">检测到 ${complianceHeaders.length} 项基础安全响应标头建议 (点击下方查看详情)：</div>
                     </div>
                 </div>
@@ -2101,7 +2163,7 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
             vulnSelectorHtml = `
             <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px; padding:12px 16px; margin:10px 14px 0 14px; font-size:13px; color:#15803d; display:flex; align-items:center; gap:8px;">
                 <span style="font-size:18px;">🎉</span>
-                <div><strong>${focusPageUrl ? `目标页面 [${focusPageUrl}] 未检出漏洞` : '目标站点未检出安全漏洞'}</strong>，系统全链路 10 个节点与连线均处于健康安全状态！</div>
+                <div><strong>${focusPageUrl ? `目标页面 [${escapeHtml(focusPageUrl)}] 在当前启用规则下未检出问题` : '当前启用的检测项未返回安全发现'}</strong>。该结论不代表目标不存在其他风险。</div>
             </div>
             `;
         }
@@ -2119,9 +2181,9 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
 
             rows += `<tr>
                 <td>${typeBadge}</td>
-                <td><code style="color:#0284c7;">${s.url}</code></td>
-                <td><strong>${s.title || '--'}</strong></td>
-                <td><span class="tag tag-low">${s.status || 200}</span></td>
+                <td><code style="color:#0284c7;">${escapeHtml(s.url)}</code></td>
+                <td><strong>${escapeHtml(s.title || '--')}</strong></td>
+                <td><span class="tag tag-low">${escapeHtml(s.status ?? '未知')}</span></td>
             </tr>`;
         });
 
@@ -2191,13 +2253,13 @@ function renderBurpSubTabContent(findings, currentFinding, sitemap, logs, archit
         let rows = '';
         logs.forEach((l, idx) => {
             rows += `<tr>
-                <td>${l.timestamp.replace('T', ' ').substring(0, 19)}</td>
-                <td><span class="tag tag-low">${l.action}</span></td>
-                <td><code>${l.target}</code></td>
-                <td>${l.details}</td>
-                <td><span class="tag tag-${l.status === 'SUCCESS' ? 'low' : 'critical'}">${l.status === 'SUCCESS' ? '成功' : '失败'}</span></td>
+                <td>${escapeHtml((l.timestamp || '').replace('T', ' ').substring(0, 19))}</td>
+                <td><span class="tag tag-low">${escapeHtml(l.action)}</span></td>
+                <td><code>${escapeHtml(l.target)}</code></td>
+                <td>${escapeHtml(l.details)}</td>
+                <td><span class="tag tag-${l.status === 'SUCCESS' ? 'low' : 'critical'}">${l.status === 'SUCCESS' ? '成功' : escapeHtml(l.status)}</span></td>
                 <td>
-                    <button class="btn btn-primary" style="font-size:11px; padding:2px 8px;" onclick="viewRawProbeTraffic('${escapeHtml(l.target)}', '${escapeHtml(l.action)}', '${escapeHtml(l.details)}')">
+                    <button class="btn btn-primary" style="font-size:11px; padding:2px 8px;" onclick="viewRawProbeTraffic(${safeInlineArg(l.target)}, ${safeInlineArg(l.action)}, ${safeInlineArg(l.details)})">
                         🔍 查看报文
                     </button>
                 </td>
@@ -2224,20 +2286,48 @@ function viewRawProbeTraffic(target, action, details) {
     } catch(e) {}
 
     const reqStr = `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: DAS-SentinelAgent/1.0 (Security Probe; DAS-AI)\r\nAccept: text/html,application/xhtml+xml,application/json,*/*\r\nAccept-Language: zh-CN,zh;q=0.9\r\nConnection: close\r\n`;
-    const respStr = `HTTP/1.1 200 OK\r\nServer: SecurityGateway\r\nContent-Type: text/html; charset=utf-8\r\nDate: ${new Date().toUTCString()}\r\n\r\n[DAS-Probe Observation]:\r\nAction: ${action}\r\nTarget: ${target}\r\nDetails: ${details}`;
+    const respStr = `[未保存原始 HTTP 响应，以下仅为审计事件]\r\n\r\nAction: ${action}\r\nTarget: ${target}\r\nDetails: ${details}`;
+    window.currentProbeTraffic = { request: reqStr, response: respStr };
 
     document.getElementById('modal-title').innerText = `[HTTP 探测报文] ${action} - ${target}`;
     document.getElementById('modal-body').innerHTML = `
     <div class="burp-http-tabs" style="margin-bottom:10px;">
-        <button class="http-tab-btn active" id="modal-tab-req" onclick="document.getElementById('modal-http-box').innerText=\`${reqStr}\`; document.getElementById('modal-tab-req').classList.add('active'); document.getElementById('modal-tab-resp').classList.remove('active');">Request (发出的请求报文)</button>
-        <button class="http-tab-btn" id="modal-tab-resp" onclick="document.getElementById('modal-http-box').innerText=\`${respStr}\`; document.getElementById('modal-tab-resp').classList.add('active'); document.getElementById('modal-tab-req').classList.remove('active');">Response (收到的响应报文)</button>
+        <button class="http-tab-btn active" id="modal-tab-req" onclick="switchRawProbeTraffic('request')">Request (发出的请求报文)</button>
+        <button class="http-tab-btn" id="modal-tab-resp" onclick="switchRawProbeTraffic('response')">Response (收到的响应报文)</button>
     </div>
-    <pre id="modal-http-box" style="background:#fafafa; border:1px solid #e2e8f0; border-radius:6px; padding:12px; font-family:monospace; font-size:12px; color:#0f172a; white-space:pre-wrap; word-break:break-all; max-height:400px; overflow:auto;">${reqStr}</pre>
+    <pre id="modal-http-box" style="background:#fafafa; border:1px solid #e2e8f0; border-radius:6px; padding:12px; font-family:monospace; font-size:12px; color:#0f172a; white-space:pre-wrap; word-break:break-all; max-height:400px; overflow:auto;">${escapeHtml(reqStr)}</pre>
     <div style="margin-top:14px; text-align:right;">
         <button class="btn btn-primary" onclick="navigator.clipboard.writeText(document.getElementById('modal-http-box').innerText); alert('报文已复制至剪贴板！');">📋 一键复制当前报文</button>
     </div>
     `;
     document.getElementById('evidence-modal').style.display = 'flex';
+}
+
+function getNodeAttackBehavior(nodeId, activeVuln) {
+    if (!activeVuln) {
+        return { status: 'safe', role: '🟢 未关联风险', text: '当前未选择风险发现。' };
+    }
+    const verified = activeVuln.verified === 1 || activeVuln.verified === true;
+    const evidenceState = verified ? '已取得响应证据' : '待人工复核';
+    const labels = {
+        user: ['affected', '🔵 请求来源', '授权巡检请求从此处发起'],
+        frontend: ['affected', '🟠 页面/资源观测', '关联到已发现页面或静态资源'],
+        cdn: ['affected', '🟠 接入层观测', '仅表示请求经过目标接入层，不推断具体厂商'],
+        backend: ['affected', '🟠 应用层研判', '仅根据当前风险证据评估潜在影响'],
+        db: ['affected', '🟠 数据层研判', '需要业务方结合资产台账进一步确认'],
+        auth: ['affected', '🟠 边界研判', '授权、鉴权与边界配置需结合证据复核']
+    };
+    const item = labels[nodeId] || ['safe', '⚪ 未关联', '当前风险没有保存与该层直接相关的证据'];
+    return { status: item[0], role: item[1], text: `${item[2]}（${evidenceState}）` };
+}
+
+function switchRawProbeTraffic(kind) {
+    const traffic = window.currentProbeTraffic || {};
+    const isRequest = kind === 'request';
+    const box = document.getElementById('modal-http-box');
+    if (box) box.innerText = isRequest ? (traffic.request || '') : (traffic.response || '');
+    document.getElementById('modal-tab-req')?.classList.toggle('active', isRequest);
+    document.getElementById('modal-tab-resp')?.classList.toggle('active', !isRequest);
 }
 
 function filterSitemap(filterType) {
@@ -2249,11 +2339,14 @@ async function retestSingleFindingLive(findingId) {
     try {
         const res = await fetch(`${API_BASE}/findings/${findingId}/retest`, { method: 'POST' });
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         const r = data.retest_result || {};
-        if (r.is_still_vulnerable) {
-            alert(`【复测结论】⚠️ 问题仍存在！\n原因：${r.reason}\n状态保持为 OPEN`);
+        if (!r.retested) {
+            alert(`【复测失败】无法判断是否已修复，原状态保持不变。\n原因：${r.reason || '服务未返回可验证证据'}`);
+        } else if (r.is_still_vulnerable) {
+            alert(`【复测结论】⚠️ 问题仍存在！\n原因：${r.reason || '复测证据仍匹配'}\n状态保持为 OPEN`);
         } else {
-            alert(`【复测结论】🎉 已经修好啦！\n原因：${r.reason}\n状态已自动更新为 FIXED (已修复)`);
+            alert(`【复测结论】🎉 已经修好啦！\n原因：${r.reason || '复测未再观察到原证据'}\n状态已自动更新为 FIXED (已修复)`);
         }
         await refreshTaskDetailsLive();
     } catch (e) {
@@ -2262,8 +2355,7 @@ async function retestSingleFindingLive(findingId) {
 }
 
 function escapeHtml(string) {
-    if (!string) return '';
-    return String(string)
+    return String(string ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -2271,8 +2363,14 @@ function escapeHtml(string) {
         .replace(/'/g, '&#039;');
 }
 
+// Encode a value as a complete JavaScript string literal, then protect the
+// surrounding HTML attribute. This is safer than interpolating quoted values.
+function safeInlineArg(value) {
+    return escapeHtml(JSON.stringify(String(value ?? '')));
+}
+
 function extractRootSiteUrl(rawUrl) {
-    if (!rawUrl) return 'http://127.0.0.1:8088';
+    if (!rawUrl) return '';
     try {
         const u = new URL(rawUrl);
         return `${u.protocol}//${u.host}`;
@@ -3024,7 +3122,7 @@ async function loadFindingsTable() {
             
             for (const [rSite, count] of Object.entries(rootSiteCounts)) {
                 selectOptionsHtml += `<option value="${escapeHtml(rSite)}" ${selectedUrlFilter === rSite ? 'selected' : ''}>${escapeHtml(rSite)} (共 ${count} 处问题)</option>`;
-                pillsHtml += `<button class="url-filter-pill ${selectedUrlFilter === rSite ? 'active' : ''}" onclick="filterFindingsByUrl('${escapeHtml(rSite)}')"><code>${escapeHtml(rSite)}</code> <span class="tag tag-critical" style="font-size:10px; padding:0 5px;">${count}</span></button>`;
+                pillsHtml += `<button class="url-filter-pill ${selectedUrlFilter === rSite ? 'active' : ''}" onclick="filterFindingsByUrl(${safeInlineArg(rSite)})"><code>${escapeHtml(rSite)}</code> <span class="tag tag-critical" style="font-size:10px; padding:0 5px;">${count}</span></button>`;
             }
             urlSelect.innerHTML = selectOptionsHtml;
             if (urlPillsBox) urlPillsBox.innerHTML = pillsHtml;
@@ -3154,28 +3252,28 @@ async function loadFindingsTable() {
             let actionBtnsHtml = '';
             if (f.status === 'CONFIRMED') {
                 actionBtnsHtml = `
-                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#b45309; border-color:#fde68a;" onclick="setFindingStatusDirect('${f.id}', 'OPEN')" title="撤回认证，移回待审池">↩️ 移回待审</button>
-                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="setFindingStatusDirect('${f.id}', 'FALSE_POSITIVE')" title="移出并标记为误报">❌ 移入误报</button>
+                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#b45309; border-color:#fde68a;" onclick="setFindingStatusDirect(${safeInlineArg(f.id)}, 'OPEN')" title="撤回认证，移回待审池">↩️ 移回待审</button>
+                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="setFindingStatusDirect(${safeInlineArg(f.id)}, 'FALSE_POSITIVE')" title="移出并标记为误报">❌ 移入误报</button>
                 `;
             } else if (f.status === 'FALSE_POSITIVE' || f.status === 'IGNORED') {
                 actionBtnsHtml = `
-                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#0284c7;" onclick="setFindingStatusDirect('${f.id}', 'OPEN')" title="重新纳入待审核初筛池">↩️ 重新入池</button>
-                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="deleteFindingDirect('${f.id}')" title="从数据库彻底删除">🗑️ 彻底删除</button>
+                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#0284c7;" onclick="setFindingStatusDirect(${safeInlineArg(f.id)}, 'OPEN')" title="重新纳入待审核初筛池">↩️ 重新入池</button>
+                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="deleteFindingDirect(${safeInlineArg(f.id)})" title="从数据库彻底删除">🗑️ 彻底删除</button>
                 `;
             } else {
                 actionBtnsHtml = `
-                    <button class="btn btn-primary" style="font-size:11px; padding:3px 9px; background:#16a34a; border-color:#15803d; font-weight:700;" onclick="setFindingStatusDirect('${f.id}', 'CONFIRMED')" title="人工复核通过：移入已认证实战库，并从本页划出">🛡️ 确认漏洞</button>
-                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="setFindingStatusDirect('${f.id}', 'FALSE_POSITIVE')" title="标记为误报并从本页划出">❌ 标记误报</button>
+                    <button class="btn btn-primary" style="font-size:11px; padding:3px 9px; background:#16a34a; border-color:#15803d; font-weight:700;" onclick="setFindingStatusDirect(${safeInlineArg(f.id)}, 'CONFIRMED')" title="人工复核通过：移入已认证实战库，并从本页划出">🛡️ 确认漏洞</button>
+                    <button class="btn" style="font-size:11px; padding:3px 8px; color:#dc2626; border-color:#fca5a5;" onclick="setFindingStatusDirect(${safeInlineArg(f.id)}, 'FALSE_POSITIVE')" title="标记为误报并从本页划出">❌ 标记误报</button>
                 `;
             }
 
             html += `<tr>
-                <td style="text-align:center;"><input type="checkbox" class="finding-row-checkbox" value="${f.id}" ${window.selectedFindingIds && window.selectedFindingIds.has(f.id) ? 'checked' : ''} onclick="toggleSingleFinding('${f.id}', this.checked)"></td>
+                <td style="text-align:center;"><input type="checkbox" class="finding-row-checkbox" value="${escapeHtml(f.id)}" ${window.selectedFindingIds && window.selectedFindingIds.has(f.id) ? 'checked' : ''} onclick="toggleSingleFinding(${safeInlineArg(f.id)}, this.checked)"></td>
                 <td><span class="tag tag-${sevTag}" style="font-weight:700; font-size:11px; padding:2px 8px;">${sevCn}</span></td>
                 <td><span class="tag tag-${isSrcExploitable ? 'critical' : 'info'}" style="font-size:10.5px; padding:1px 6px;">${isSrcExploitable ? '🎯 SRC 实战漏洞' : '📋 安全基线建议'}</span></td>
                 <td>${statusBadgeHtml}</td>
-                <td><span style="font-size:11px; color:#64748b;">${f.category}</span></td>
-                <td><strong>${f.title}</strong></td>
+                <td><span style="font-size:11px; color:#64748b;">${escapeHtml(f.category)}</span></td>
+                <td><strong>${escapeHtml(f.title)}</strong></td>
 
                 <td>
                     <div style="font-weight:700; color:#0f172a; font-size:12px;">🏠 ${escapeHtml(rootSite)}</div>
@@ -3185,12 +3283,12 @@ async function loadFindingsTable() {
                         </span>
                     </div>
                 </td>
-                <td><strong>${f.cvss_score}</strong></td>
+                <td><strong>${escapeHtml(f.cvss_score)}</strong></td>
                 <td>
                     <div style="display:flex; gap:4px; flex-wrap:wrap; align-items:center;">
                         ${actionBtnsHtml}
-                        <button class="btn" style="font-size:11px; padding:3px 6px;" onclick="showEvidence('${f.id}')">🔍 证据</button>
-                        <button class="btn" style="font-size:11px; padding:3px 6px;" onclick="openTaskDetailsView('${f.task_id}', '${escapeHtml(f.url)}', '${f.id}')" title="查看网页拓扑图与该页漏洞">⚡ 拓扑</button>
+                        <button class="btn" style="font-size:11px; padding:3px 6px;" onclick="showEvidence(${safeInlineArg(f.id)})">🔍 证据</button>
+                        <button class="btn" style="font-size:11px; padding:3px 6px;" onclick="openTaskDetailsView(${safeInlineArg(f.task_id)}, ${safeInlineArg(f.url)}, ${safeInlineArg(f.id)})" title="查看网页拓扑图与该页漏洞">⚡ 拓扑</button>
                     </div>
                 </td>
             </tr>`;
@@ -3214,21 +3312,21 @@ async function showEvidence(id) {
     if (deep) {
         let deepDetailContent = '';
         if (deep.findings_detail) {
-            deepDetailContent = `<pre style="background:#0f172a; color:#38bdf8; padding:10px; border-radius:6px; font-size:11px; overflow-x:auto;">${JSON.stringify(deep.findings_detail, null, 2)}</pre>`;
+            deepDetailContent = `<pre style="background:#0f172a; color:#38bdf8; padding:10px; border-radius:6px; font-size:11px; overflow-x:auto;">${escapeHtml(JSON.stringify(deep.findings_detail, null, 2))}</pre>`;
         } else if (deep.accessible_files) {
             let fileListHtml = deep.accessible_files.map(af => `
                 <li style="margin-bottom:4px;">
-                    <code style="color:#dc2626; font-weight:bold;">${af.file}</code> - <span>${af.description}</span>
-                    <div style="color:#64748b; font-size:11px; margin-top:2px;">摘要: <code>${af.sample_snippet}</code></div>
+                    <code style="color:#dc2626; font-weight:bold;">${escapeHtml(af.file)}</code> - <span>${escapeHtml(af.description)}</span>
+                    <div style="color:#64748b; font-size:11px; margin-top:2px;">摘要: <code>${escapeHtml(af.sample_snippet)}</code></div>
                 </li>
             `).join('');
             deepDetailContent = `<ul style="padding-left:18px; margin-top:6px; font-size:12px;">${fileListHtml}</ul>`;
         } else if (deep.enumeration_proof) {
             let enumRows = deep.enumeration_proof.map(ep => `
                 <tr>
-                    <td><code>ID: ${ep.object_id}</code></td>
+                    <td><code>ID: ${escapeHtml(ep.object_id)}</code></td>
                     <td><span class="tag tag-high">可越权读取</span></td>
-                    <td><code style="font-size:11px;">${ep.response_preview}</code></td>
+                    <td><code style="font-size:11px;">${escapeHtml(ep.response_preview)}</code></td>
                 </tr>
             `).join('');
             deepDetailContent = `
@@ -3253,10 +3351,10 @@ async function showEvidence(id) {
         <div style="background:#f0fdfa; border:1px solid #99f6e4; border-radius:8px; padding:12px 14px; margin:14px 0;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <strong style="color:#0d9488; font-size:13px;">🚀 专项深入利用测试证据 (Specialized Post-Discovery Deep Audit)</strong>
-                <span class="tag tag-critical" style="font-size:10px;">100% 深度验证确认 (零误报)</span>
+                <span class="tag ${f.verified ? 'tag-low' : 'tag-medium'}" style="font-size:10px;">${f.verified ? '已获得复核证据' : '待人工复核'}</span>
             </div>
             <div style="font-size:12px; color:#134e4a; margin-top:6px;">
-                <strong>所属专项分析模块：</strong> ${deep.specialized_module || '深度渗透测试引擎'}
+                <strong>所属专项分析模块：</strong> ${escapeHtml(deep.specialized_module || '专项证据分析模块')}
             </div>
             <div style="margin-top:8px;">
                 ${deepDetailContent}
@@ -3267,24 +3365,24 @@ async function showEvidence(id) {
     }
 
     let bodyHtml = `
-    <p><strong>📍 出现问题的网址：</strong> <code style="color:#0284c7;">${f.url}</code></p>
-    <p style="margin-top:6px;"><strong>⚠️ 危害与风险说明：</strong> ${f.impact}</p>
+    <p><strong>📍 出现问题的网址：</strong> <code style="color:#0284c7;">${escapeHtml(f.url)}</code></p>
+    <p style="margin-top:6px;"><strong>⚠️ 危害与风险说明：</strong> ${escapeHtml(f.impact)}</p>
     
     ${deepAuditHtml}
 
     <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:12px; margin:14px 0;">
         <strong style="color:#0284c7;">🔍 现场抓到的证据 (Evidence Snapshot):</strong>
-        <pre style="color:#0f172a; font-family:monospace; margin-top:8px; white-space:pre-wrap; word-break:break-all; font-size:12px;">${evidence.matched_snippet || JSON.stringify(evidence, null, 2)}</pre>
+        <pre style="color:#0f172a; font-family:monospace; margin-top:8px; white-space:pre-wrap; word-break:break-all; font-size:12px;">${escapeHtml(evidence.matched_snippet || JSON.stringify(evidence, null, 2))}</pre>
     </div>
 
     <div style="background:#f0fdf4; border-left:4px solid #16a34a; padding:10px 14px; border-radius:4px; margin-top:12px;">
         <strong style="color:#15803d;">🛠️ 修复方法 (照着改就能修好)：</strong>
-        <p style="margin-top:4px; color:#166534;">${f.remediation}</p>
+        <p style="margin-top:4px; color:#166534;">${escapeHtml(f.remediation)}</p>
     </div>
 
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-        <button class="btn btn-primary" onclick="retestSingleFindingLive('${f.id}')">⚡ 立即重新检查是否修好</button>
-        <button class="btn" onclick="updateFindingStatus('${f.id}', '${f.status === 'OPEN' ? 'FIXED' : 'OPEN'}')">
+        <button class="btn btn-primary" onclick="retestSingleFindingLive(${safeInlineArg(f.id)})">⚡ 立即重新检查是否修好</button>
+        <button class="btn" onclick="updateFindingStatus(${safeInlineArg(f.id)}, ${safeInlineArg(f.status === 'OPEN' ? 'FIXED' : 'OPEN')})">
             ${f.status === 'OPEN' ? '✔ 手动标记为已修复' : '重新标记为待处理'}
         </button>
     </div>
@@ -3336,7 +3434,7 @@ async function loadBaselineOptions() {
     const currSel = document.getElementById('curr-task-select');
     if (!baseSel || !currSel) return;
 
-    let opts = tasks.map(t => `<option value="${t.id}">${t.name} (${t.created_at.substring(0, 19)})</option>`).join('');
+    let opts = tasks.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)} (${escapeHtml((t.created_at || '').substring(0, 19))})</option>`).join('');
     baseSel.innerHTML = opts;
     currSel.innerHTML = opts;
     if (tasks.length > 1) {
@@ -3361,7 +3459,7 @@ async function runBaselineDiff() {
         <div class="grid-4" style="margin-bottom:16px;">
             <div class="card" style="background:#f8fafc;">
                 <div class="card-title">整体安全趋势</div>
-                <div class="card-val" style="font-size:18px; color:#16a34a;">${diff.risk_trend}</div>
+                <div class="card-val" style="font-size:18px; color:#16a34a;">${escapeHtml(diff.risk_trend)}</div>
             </div>
             <div class="card" style="background:#f8fafc;">
                 <div class="card-title">已修复好隐患</div>
@@ -3378,10 +3476,10 @@ async function runBaselineDiff() {
         </div>
 
         <h4 style="color:#16a34a; margin:16px 0 8px 0;">🎉 本次巡检已成功修好闭环的问题 (${diff.fixed_findings_count} 项):</h4>
-        ${diff.fixed_findings.length ? diff.fixed_findings.map(f => `<p style="color:#15803d; font-size:13px; margin-bottom:4px;">✔ [已修复] <strong>${f.title}</strong> (${f.url})</p>`).join('') : '<p style="color:#64748b; font-size:13px;">无</p>'}
+        ${diff.fixed_findings.length ? diff.fixed_findings.map(f => `<p style="color:#15803d; font-size:13px; margin-bottom:4px;">✔ [已修复] <strong>${escapeHtml(f.title)}</strong> (${escapeHtml(f.url)})</p>`).join('') : '<p style="color:#64748b; font-size:13px;">无</p>'}
 
         <h4 style="color:#dc2626; margin:16px 0 8px 0;">⚠️ 本次巡检新出现的问题 (${diff.new_findings_count} 项):</h4>
-        ${diff.new_findings.length ? diff.new_findings.map(f => `<p style="color:#dc2626; font-size:13px; margin-bottom:4px;">✖ [新风险] <strong>${f.title}</strong> (${f.url})</p>`).join('') : '<p style="color:#64748b; font-size:13px;">无新增隐患</p>'}
+        ${diff.new_findings.length ? diff.new_findings.map(f => `<p style="color:#dc2626; font-size:13px; margin-bottom:4px;">✖ [新风险] <strong>${escapeHtml(f.title)}</strong> (${escapeHtml(f.url)})</p>`).join('') : '<p style="color:#64748b; font-size:13px;">无新增隐患</p>'}
         `;
         box.innerHTML = html;
     } catch (e) {
@@ -3515,13 +3613,13 @@ async function loadRulesTable() {
             <tbody>`;
         rules.forEach(r => {
             html += `<tr>
-                <td><strong>${r.name}</strong></td>
-                <td><code>${r.category}</code></td>
-                <td><span class="tag tag-${r.risk_level.toLowerCase()}">${r.risk_level}</span></td>
-                <td><code style="color:#0284c7;">${r.pattern.substring(0, 45)}${r.pattern.length > 45 ? '...' : ''}</code></td>
+                <td><strong>${escapeHtml(r.name)}</strong></td>
+                <td><code>${escapeHtml(r.category)}</code></td>
+                <td><span class="tag tag-${escapeHtml(r.risk_level.toLowerCase())}">${escapeHtml(r.risk_level)}</span></td>
+                <td><code style="color:#0284c7;">${escapeHtml(r.pattern.substring(0, 45))}${r.pattern.length > 45 ? '...' : ''}</code></td>
                 <td>${r.is_builtin ? '<span class="tag tag-info">系统内置</span>' : '<span class="tag tag-medium">用户自定义</span>'}</td>
                 <td>
-                    ${!r.is_builtin ? `<button class="btn" style="font-size:11px; color:#dc2626; padding:2px 6px;" onclick="deleteRule('${r.id}')">删除</button>` : '<span style="color:#64748b; font-size:11px;">内置保护</span>'}
+                    ${!r.is_builtin ? `<button class="btn" style="font-size:11px; color:#dc2626; padding:2px 6px;" onclick="deleteRule(${safeInlineArg(r.id)})">删除</button>` : '<span style="color:#64748b; font-size:11px;">内置保护</span>'}
                 </td>
             </tr>`;
         });
@@ -3573,12 +3671,12 @@ async function testRulePattern() {
     const data = await res.json();
     const resultBox = document.getElementById('rule-test-result');
     if (data.success) {
-        resultBox.innerHTML = `<p style="color:#16a34a; font-weight:600;">✔ 成功抓到敏感数据！共命中 <strong>${data.match_count}</strong> 处：</p>
+        resultBox.innerHTML = `<p style="color:#16a34a; font-weight:600;">✔ 成功抓到敏感数据！共命中 <strong>${escapeHtml(data.match_count)}</strong> 处：</p>
         ${data.matches.map(m => `<div style="background:#f8fafc; border:1px solid #e2e8f0; padding:8px 12px; border-radius:4px; margin-top:4px;">
-            原值: <code>${m.value}</code> | 自动脱敏掩码: <strong style="color:#0284c7;">${m.masked}</strong> | 算法校验真假: ${m.is_valid_checksum ? '✅ 是有效真实号码' : '❌ 假号码或误报过滤(系统会自动过滤)'}
+            原值: <code>${escapeHtml(m.value)}</code> | 自动脱敏掩码: <strong style="color:#0284c7;">${escapeHtml(m.masked)}</strong> | 算法校验真假: ${m.is_valid_checksum ? '✅ 是有效真实号码' : '❌ 假号码或误报过滤(系统会自动过滤)'}
         </div>`).join('')}`;
     } else {
-        resultBox.innerHTML = `<p style="color:#dc2626;">❌ 测试错误: ${data.error}</p>`;
+        resultBox.innerHTML = `<p style="color:#dc2626;">❌ 测试错误: ${escapeHtml(data.error)}</p>`;
     }
 }
 
@@ -3594,12 +3692,12 @@ function getHengnaoHTML() {
     <div class="grid-2">
         <div class="card">
             <div class="card-title"><span>🤖 安恒恒脑安全智能体开发平台 (gc.das-ai.com) 对接</span></div>
-            <p style="font-size:13px; color:#64748b; margin-bottom:12px;">本系统原生兼容安恒恒脑智能体协议，支持作为标准安全 Agent Tool 注册接入。</p>
+            <p style="font-size:13px; color:#64748b; margin-bottom:12px;">平台对接不在本轮功能优化范围内；以下内容仅保留为后续集成占位，不代表当前已完成联调。</p>
             <div style="background:#f8fafc; padding:14px; border-radius:8px; border:1px solid #e2e8f0; font-size:13px;">
                 <p><strong>恒脑平台地址：</strong> <code>https://gc.das-ai.com/</code></p>
                 <p style="margin-top:6px;"><strong>智能体标识：</strong> <code>agent-das-websec-inspector</code></p>
                 <p style="margin-top:6px;"><strong>工具清单规范：</strong> OpenAPI 3.0 / Function Calling Schema</p>
-                <p style="margin-top:6px;"><strong>当前对接状态：</strong> <span class="badge-pill" style="display:inline-flex; background:#dcfce7; color:#15803d; border-color:#bbf7d0;">已就绪 (READY)</span></p>
+                <p style="margin-top:6px;"><strong>当前对接状态：</strong> <span class="badge-pill" style="display:inline-flex; background:#fef3c7; color:#92400e; border-color:#fde68a;">未启用 / 未联调</span></p>
             </div>
         </div>
 
@@ -3649,11 +3747,11 @@ async function loadAuditLogs() {
             <tbody>`;
         logs.forEach(l => {
             html += `<tr>
-                <td>${l.timestamp.replace('T', ' ').substring(0, 19)}</td>
-                <td><span class="tag tag-low">${l.action}</span></td>
-                <td><code>${l.operator}</code></td>
-                <td><code>${l.target}</code></td>
-                <td>${l.details}</td>
+                <td>${escapeHtml((l.timestamp || '').replace('T', ' ').substring(0, 19))}</td>
+                <td><span class="tag tag-low">${escapeHtml(l.action)}</span></td>
+                <td><code>${escapeHtml(l.operator)}</code></td>
+                <td><code>${escapeHtml(l.target)}</code></td>
+                <td>${escapeHtml(l.details)}</td>
                 <td><span class="tag tag-${l.status === 'SUCCESS' ? 'low' : 'critical'}">${l.status === 'SUCCESS' ? '成功' : '失败'}</span></td>
             </tr>`;
         });
@@ -3667,7 +3765,13 @@ async function loadAuditLogs() {
 /* ---------------- 9. MSGBOX 开发者接口与专项测试工作台 ---------------- */
 let currentMsgboxPresets = [];
 let isMsgboxTokenMasked = true;
-const MSGBOX_DEFAULT_TOKEN = "16886c609ab84b41cabc010c7e3dea297a478cb74129f072f7d886194c25dbba";
+let currentMsgboxConfig = {
+    target_url: "",
+    default_token: "",
+    masked_token: "",
+    token_length: 0,
+    configured: false
+};
 
 function getMsgBoxToolHTML() {
     return `
@@ -3679,7 +3783,7 @@ function getMsgBoxToolHTML() {
                     <span style="font-size: 24px;">🧰</span>
                     <div>
                         <h3 style="font-size: 17px; font-weight: 700; color: #0369a1; margin: 0;">MsgBox 开发者接口与专项安全测试工作台</h3>
-                        <p style="font-size: 13px; color: #64748b; margin: 3px 0 0 0;">针对目标站点 <code>https://msgbox-merc.vercel.app/</code> 的专项开发 API 接口调试、鉴权审计与渗透防护测试</p>
+                        <p style="font-size: 13px; color: #64748b; margin: 3px 0 0 0;">针对已获授权目标的开发 API 接口调试、鉴权审计与非破坏性安全检查</p>
                     </div>
                 </div>
             </div>
@@ -3695,9 +3799,9 @@ function getMsgBoxToolHTML() {
             <div style="display: flex; align-items: center; gap: 10px;">
                 <span style="font-size: 13px; font-weight: 700; color: #334155;">🔑 开发者 API 凭证 (Token):</span>
                 <code id="msgbox-token-display" style="background: #f1f5f9; padding: 4px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; color: #0f172a; word-break: break-all;">
-                    16886c60********************************************dbba
+                    未配置
                 </code>
-                <span class="tag tag-low" style="font-size: 11px;">SHA-256 (64-Hex)</span>
+                <span class="tag tag-medium" style="font-size: 11px;">仅显示状态，不从服务端回传明文</span>
             </div>
             <div style="display: flex; gap: 6px;">
                 <button class="btn btn-sm" onclick="toggleMsgBoxTokenVisibility()" style="border: 1px solid #cbd5e1; background: #fff; font-size: 12px;">
@@ -3707,6 +3811,17 @@ function getMsgBoxToolHTML() {
                     📋 复制 Token
                 </button>
             </div>
+        </div>
+
+        <div style="margin-top: 12px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 10px;">
+            <label style="font-size: 12px; color: #475569;">
+                授权目标 URL
+                <input id="msgbox-target-url" type="url" placeholder="https://your-authorized-lab.example" style="display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box;">
+            </label>
+            <label style="font-size: 12px; color: #475569;">
+                API Token（可选，留空则不注入鉴权头）
+                <input id="msgbox-api-token" type="password" autocomplete="off" placeholder="由授权目标方提供" style="display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box;">
+            </label>
         </div>
     </div>
 
@@ -3792,7 +3907,7 @@ function getMsgBoxToolHTML() {
                     <span>📡</span> <span>实时响应控制台 (Response & Telemetry)</span>
                 </h4>
                 <div id="msgbox-status-pill" style="display: none;">
-                    <span class="tag tag-low" id="msgbox-status-code">200 OK</span>
+                    <span class="tag tag-low" id="msgbox-status-code">-- 未请求 --</span>
                     <span style="font-size: 11px; color: #64748b; margin-left: 6px;" id="msgbox-time-cost">-- ms</span>
                 </div>
             </div>
@@ -3853,7 +3968,12 @@ async function initMsgBoxTool() {
         const res = await fetch(`${API_BASE}/msgbox/config`);
         if (res.ok) {
             const data = await res.json();
+            currentMsgboxConfig = { ...currentMsgboxConfig, ...data };
             currentMsgboxPresets = data.presets || [];
+            const targetInput = document.getElementById("msgbox-target-url");
+            if (targetInput && data.target_url) targetInput.value = data.target_url;
+            const tokenDisplay = document.getElementById("msgbox-token-display");
+            if (tokenDisplay) tokenDisplay.innerText = data.masked_token || "未配置";
         }
     } catch (e) {
         console.error("Failed to load msgbox config:", e);
@@ -3864,21 +3984,33 @@ function toggleMsgBoxTokenVisibility() {
     isMsgboxTokenMasked = !isMsgboxTokenMasked;
     const el = document.getElementById("msgbox-token-display");
     const icon = document.getElementById("token-eye-icon");
+    const tokenInput = document.getElementById("msgbox-api-token");
     if (!el) return;
+    const token = tokenInput?.value || "";
+    if (!token) {
+        el.innerText = currentMsgboxConfig.masked_token || (currentMsgboxConfig.configured ? "部署环境已配置" : "未配置");
+        if (icon) icon.innerText = "👁️";
+        return;
+    }
     if (isMsgboxTokenMasked) {
-        el.innerText = MSGBOX_DEFAULT_TOKEN.substring(0, 8) + "********************************************" + MSGBOX_DEFAULT_TOKEN.substring(MSGBOX_DEFAULT_TOKEN.length - 4);
+        el.innerText = token.substring(0, 4) + "…" + token.substring(token.length - 4);
         if (icon) icon.innerText = "👁️";
     } else {
-        el.innerText = MSGBOX_DEFAULT_TOKEN;
+        el.innerText = token;
         if (icon) icon.innerText = "🙈";
     }
 }
 
 function copyMsgBoxToken() {
-    navigator.clipboard.writeText(MSGBOX_DEFAULT_TOKEN).then(() => {
+    const token = document.getElementById("msgbox-api-token")?.value || "";
+    if (!token) {
+        alert("当前未配置 API Token，请先在授权目标方提供后填写。");
+        return;
+    }
+    navigator.clipboard.writeText(token).then(() => {
         alert("✅ API Token 已成功复制到剪贴板！");
     }).catch(() => {
-        prompt("请手动复制 API Token:", MSGBOX_DEFAULT_TOKEN);
+        prompt("请手动复制 API Token:", token);
     });
 }
 
@@ -3923,6 +4055,13 @@ async function executeMsgBoxApiRequest() {
     const bodyView = document.getElementById("msgbox-response-body");
     const headersView = document.getElementById("msgbox-response-headers");
     const insightsBox = document.getElementById("msgbox-security-insights");
+    const targetUrl = document.getElementById("msgbox-target-url")?.value.trim() || "";
+    const apiToken = document.getElementById("msgbox-api-token")?.value || "";
+
+    if (!targetUrl) {
+        alert("请先填写已获授权的目标 URL；系统不会自动请求内置演示站点。");
+        return;
+    }
 
     let customHeaders = {};
     if (headersRaw.trim()) {
@@ -3934,6 +4073,16 @@ async function executeMsgBoxApiRequest() {
         }
     }
 
+    const requestPayload = {
+        base_url: targetUrl,
+        endpoint: endpoint,
+        method: method,
+        custom_headers: customHeaders,
+        body_json: bodyRaw
+    };
+    // 为空时省略字段，让服务端按部署环境注入的 Token 处理；不在前端回显该凭证。
+    if (apiToken) requestPayload.api_token = apiToken;
+
     if (sendBtn) {
         sendBtn.disabled = true;
         sendBtn.innerHTML = `<span>⏳ 请求发送中...</span>`;
@@ -3943,14 +4092,7 @@ async function executeMsgBoxApiRequest() {
         const res = await fetch(`${API_BASE}/msgbox/execute`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                base_url: "https://msgbox-merc.vercel.app",
-                endpoint: endpoint,
-                method: method,
-                api_token: MSGBOX_DEFAULT_TOKEN,
-                custom_headers: customHeaders,
-                body_json: bodyRaw
-            })
+            body: JSON.stringify(requestPayload)
         });
 
         const data = await res.json();
@@ -3979,7 +4121,7 @@ async function executeMsgBoxApiRequest() {
         if (insightsBox && data.security_insights) {
             let insHtml = `<strong>🔍 安全研判与通信指标:</strong><ul style="margin: 4px 0 0 16px; padding: 0;">`;
             data.security_insights.forEach(item => {
-                insHtml += `<li>${item}</li>`;
+                insHtml += `<li>${escapeHtml(item)}</li>`;
             });
             insHtml += `</ul>`;
             insightsBox.innerHTML = insHtml;
@@ -4036,19 +4178,26 @@ async function executeMsgBoxSecurityAudit() {
 }
 
 async function launchMsgBoxFullScan() {
-    if (!confirm("确定要针对 MsgBox 目标站点 (https://msgbox-merc.vercel.app/) 启动带开发者 Token 的全维度安全巡检任务吗？")) {
+    const targetUrl = document.getElementById("msgbox-target-url")?.value.trim() || "";
+    const apiToken = document.getElementById("msgbox-api-token")?.value || "";
+    if (!targetUrl) {
+        alert("请先填写已获授权的目标 URL；系统不会自动请求内置演示站点。");
         return;
     }
+    if (!confirm("确定要针对已授权目标 " + targetUrl + " 启动全维度安全巡检任务吗？")) {
+        return;
+    }
+    const scanPayload = {
+        base_url: targetUrl,
+        max_depth: 2,
+        max_pages: 15
+    };
+    if (apiToken) scanPayload.api_token = apiToken;
     try {
         const res = await fetch(`${API_BASE}/msgbox/launch_scan`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                base_url: "https://msgbox-merc.vercel.app",
-                api_token: MSGBOX_DEFAULT_TOKEN,
-                max_depth: 2,
-                max_pages: 15
-            })
+            body: JSON.stringify(scanPayload)
         });
         const data = await res.json();
         if (data.status === "SUCCESS") {

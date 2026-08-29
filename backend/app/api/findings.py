@@ -7,6 +7,11 @@ from backend.app.models.finding import FindingResponse
 
 router = APIRouter(prefix="/findings", tags=["风险发现与漏洞管理"])
 
+# Keep status transitions explicit so malformed client input cannot create
+# unrecognised states that the report, baseline and retest workflows cannot
+# interpret.
+VALID_FINDING_STATUSES = {"OPEN", "FIXED", "CONFIRMED", "IGNORED", "FALSE_POSITIVE"}
+
 @router.get("", response_model=List[FindingResponse])
 async def list_findings(
     task_id: Optional[str] = Query(None, description="按任务ID筛选"),
@@ -92,8 +97,17 @@ async def get_finding(finding_id: str):
 
 @router.post("/{finding_id}/status")
 async def update_finding_status(finding_id: str, status: str = Query(..., description="新状态：CONFIRMED, OPEN, FIXED, IGNORED, FALSE_POSITIVE")):
+    status = status.upper().strip()
+    if status not in VALID_FINDING_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Unsupported finding status: {status}")
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    cursor.execute("SELECT title, url FROM findings WHERE id = ?", (finding_id,))
+    f_row = cursor.fetchone()
+    if not f_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Finding not found")
     
     now = datetime.now().isoformat()
     verified_val = 1 if status == "CONFIRMED" else 0
@@ -105,10 +119,7 @@ async def update_finding_status(finding_id: str, status: str = Query(..., descri
     """, (status, verified_val, now, finding_id))
     
     # 记录审计日志
-    cursor.execute("SELECT title, url FROM findings WHERE id = ?", (finding_id,))
-    f_row = cursor.fetchone()
-    if f_row:
-        cursor.execute("""
+    cursor.execute("""
         INSERT INTO audit_logs (timestamp, action, operator, target, details, status)
         VALUES (?, 'UPDATE_FINDING_STATUS', 'SECURITY_EXPERT', ?, ?, 'SUCCESS')
         """, (now, f_row["url"], f"专家人工审核漏洞 [{f_row['title']}] 状态更新为: {status}"))
@@ -122,6 +133,10 @@ async def delete_single_finding(finding_id: str):
     """彻底删除特定漏洞记录"""
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT id FROM findings WHERE id = ?", (finding_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Finding not found")
     cursor.execute("DELETE FROM findings WHERE id = ?", (finding_id,))
     conn.commit()
     conn.close()
@@ -144,7 +159,9 @@ async def cleanup_false_positives():
 async def batch_update_status(payload: dict):
     """批量更新指定漏洞的状态"""
     finding_ids = payload.get("finding_ids", [])
-    status = payload.get("status", "CONFIRMED")
+    status = str(payload.get("status", "CONFIRMED")).upper().strip()
+    if status not in VALID_FINDING_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Unsupported finding status: {status}")
     if not finding_ids:
         return {"updated_count": 0, "message": "未提供漏洞 ID"}
     
@@ -162,10 +179,11 @@ async def batch_update_status(payload: dict):
         SET status = ?, verified = ?, verified_at = ? 
         WHERE id IN ({placeholders})
     """, params)
+    updated_count = cursor.rowcount
     
     conn.commit()
     conn.close()
-    return {"updated_count": len(finding_ids), "message": f"已成功更新 {len(finding_ids)} 项记录状态"}
+    return {"updated_count": updated_count, "message": f"已成功更新 {updated_count} 项记录状态"}
 
 @router.post("/batch-delete")
 async def batch_delete_findings(payload: dict):
@@ -177,9 +195,10 @@ async def batch_delete_findings(payload: dict):
     cursor = conn.cursor()
     placeholders = ",".join(["?"] * len(finding_ids))
     cursor.execute(f"DELETE FROM findings WHERE id IN ({placeholders})", finding_ids)
+    deleted_count = cursor.rowcount
     conn.commit()
     conn.close()
-    return {"deleted_count": len(finding_ids), "message": f"已成功彻底删除 {len(finding_ids)} 项漏洞记录"}
+    return {"deleted_count": deleted_count, "message": f"已成功彻底删除 {deleted_count} 项漏洞记录"}
 
 @router.post("/{finding_id}/retest")
 async def retest_finding(finding_id: str):
@@ -199,7 +218,7 @@ async def retest_finding(finding_id: str):
     
     # 执行复测
     retest_result = await FindingVerifier.retest_single_finding(finding)
-    new_status = retest_result["status_suggested"]
+    new_status = retest_result["status_suggested"] if retest_result.get("retested") else finding.get("status", "OPEN")
     
     now = datetime.now().isoformat()
     cursor.execute("UPDATE findings SET status = ?, verified_at = ? WHERE id = ?", (new_status, now, finding_id))
@@ -208,7 +227,12 @@ async def retest_finding(finding_id: str):
     cursor.execute("""
     INSERT INTO audit_logs (timestamp, action, operator, target, details, status)
     VALUES (?, 'RETEST_FINDING', 'DAS_SENTINEL_AGENT', ?, ?, ?)
-    """, (now, finding["url"], f"复测 [{finding['title']}] 结论: {retest_result['reason']}", "SUCCESS"))
+    """, (
+        now,
+        finding["url"],
+        f"复测 [{finding['title']}] 结论: {retest_result['reason']}",
+        "SUCCESS" if retest_result.get("retested") else "FAILED"
+    ))
     
     conn.commit()
     conn.close()

@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Dict, Any, List
 from backend.app.config import settings
@@ -29,10 +30,18 @@ class ReportService:
         
         summary = json.loads(task.get("summary") or "{}")
         sev_counts = summary.get("severity_counts", {})
-        score = summary.get("security_score", 100)
-        status_level = summary.get("status_level", "HEALTHY (安全状态良好)")
+        raw_score = summary.get("security_score")
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
+            score = raw_score
+        else:
+            try:
+                score = float(raw_score) if raw_score not in (None, "") else None
+            except (TypeError, ValueError):
+                score = None
+        status_level = summary.get("status_level", "未生成安全评分")
+        scan_quality_note = summary.get("scan_quality_note", "")
         
-        score_color = "#16a34a" if score >= 85 else ("#d97706" if score >= 60 else "#dc2626")
+        score_color = "#64748b" if score is None else ("#16a34a" if score >= 85 else ("#d97706" if score >= 60 else "#dc2626"))
         
         findings_html = ""
         for idx, f in enumerate(findings, 1):
@@ -60,36 +69,50 @@ class ReportService:
                 "INFO": "#cbd5e1"
             }.get(sev, "#cbd5e1")
             
-            snippet = evidence.get("matched_snippet", "")
+            snippet = escape(str(evidence.get("matched_snippet", "")))
+            safe_title = escape(str(f.get("title") or ""))
+            safe_url = escape(str(f.get("url") or ""))
+            safe_impact = escape(str(f.get("impact") or ""))
+            safe_remediation = escape(str(f.get("remediation") or ""))
+            safe_severity = escape(str(sev))
+            safe_cvss = escape(str(f.get("cvss_score", 0.0)))
             
             findings_html += f"""
             <div class="finding-card">
                 <div class="finding-header">
                     <span class="finding-num">#{idx}</span>
-                    <span class="severity-badge" style="background:{badge_bg}; color:{badge_text}; border:1px solid {badge_border};">{sev}</span>
-                    <span class="finding-title">{f.get('title')}</span>
-                    <span class="cvss-pill">CVSS {f.get('cvss_score', 0.0)}</span>
+                    <span class="severity-badge" style="background:{badge_bg}; color:{badge_text}; border:1px solid {badge_border};">{safe_severity}</span>
+                    <span class="finding-title">{safe_title}</span>
+                    <span class="cvss-pill">CVSS {safe_cvss}</span>
                 </div>
                 <div class="finding-body">
-                    <p><strong>📍 风险目标：</strong><code style="color:#0284c7; background:#f1f5f9; padding:2px 6px; border-radius:4px;">{f.get('url')}</code></p>
-                    <p style="margin-top:6px;"><strong>⚠️ 危害影响与原理：</strong>{f.get('impact')}</p>
+                    <p><strong>📍 风险目标：</strong><code style="color:#0284c7; background:#f1f5f9; padding:2px 6px; border-radius:4px;">{safe_url}</code></p>
+                    <p style="margin-top:6px;"><strong>⚠️ 危害影响与原理：</strong>{safe_impact}</p>
                     <div class="evidence-box">
                         <strong style="color:#0284c7;">🔍 现场证据链 (Evidence Snapshot)：</strong>
                         <pre>{snippet}</pre>
                     </div>
                     <div class="remediation-box">
                         <strong style="color:#15803d;">🛠️ 专家整改与代码修复建议：</strong>
-                        <p style="margin-top:4px; color:#166534;">{f.get('remediation')}</p>
+                        <p style="margin-top:4px; color:#166534;">{safe_remediation}</p>
                     </div>
                 </div>
             </div>
             """
 
+        safe_task_name = escape(str(task.get("name") or ""))
+        safe_target_url = escape(str(task.get("target_url") or ""))
+        safe_started_at = escape(str(task.get("started_at") or ""))
+        safe_finished_at = escape(str(task.get("finished_at") or ""))
+        safe_status_level = escape(str(status_level))
+        safe_score = escape("--" if score is None else str(score))
+        safe_scan_quality_note = escape(str(scan_quality_note))
+
         html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>网站安全智能巡检与敏感信息防泄露评估报告 - {task.get('name')}</title>
+    <title>网站安全智能巡检与敏感信息防泄露评估报告 - {safe_task_name}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -281,16 +304,17 @@ class ReportService:
         </div>
 
         <div class="meta-grid">
-            <div><strong>任务名称：</strong>{task.get('name')}</div>
-            <div><strong>目标站点：</strong><code>{task.get('target_url')}</code></div>
-            <div><strong>巡检周期/时间：</strong>{task.get('started_at', '')} ~ {task.get('finished_at', '')}</div>
-            <div><strong>综合安全态势：</strong><strong style="color:{score_color};">{status_level}</strong></div>
+            <div><strong>任务名称：</strong>{safe_task_name}</div>
+            <div><strong>目标站点：</strong><code>{safe_target_url}</code></div>
+            <div><strong>巡检周期/时间：</strong>{safe_started_at} ~ {safe_finished_at}</div>
+            <div><strong>综合安全态势：</strong><strong style="color:{score_color};">{safe_status_level}</strong></div>
+            <div><strong>结果质量：</strong>{safe_scan_quality_note or "未记录"}</div>
         </div>
 
         <div class="score-card">
             <div style="font-size: 14px; color: #64748b; font-weight: 700;">综合安全态势评分</div>
-            <div class="score-num">{score} <span style="font-size: 20px; color:#64748b;">/ 100</span></div>
-            <div style="font-size: 13px; color: #475569; margin-top: 4px;">{status_level}</div>
+            <div class="score-num">{safe_score} <span style="font-size: 20px; color:#64748b;">/ 100</span></div>
+            <div style="font-size: 13px; color: #475569; margin-top: 4px;">{safe_status_level}</div>
         </div>
 
         <div class="stats-row">
@@ -314,11 +338,11 @@ class ReportService:
 
         <h3 style="border-left: 4px solid #0284c7; padding-left: 12px; margin: 28px 0 16px 0; color:#0f172a;">📋 详细风险隐患与整改建议清单 ({len(findings)} 项)</h3>
         
-        {findings_html if findings else '<p style="text-align:center; color:#16a34a; padding:40px; font-size:15px; font-weight:700;">🎉 未检测到安全隐患，网站运行状态良好！</p>'}
+        {findings_html if findings else '<p style="text-align:center; color:#16a34a; padding:40px; font-size:15px; font-weight:700;">当前授权范围和检测策略下未产生风险发现。</p>'}
 
         <div class="footer">
-            <p><strong>杭州安恒信息技术股份有限公司 (DAS-Security) · 恒脑安全智能体开发支持</strong></p>
-            <p>报告生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 本报告受数字签名、不可篡改基线与全流程日志审计保护</p>
+            <p><strong>DAS-SentinelAgent 本地巡检报告</strong></p>
+            <p>报告生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 数据来自任务快照与审计日志</p>
         </div>
     </div>
 </body>
@@ -361,7 +385,7 @@ class ReportService:
         ]
         
         if not src_findings:
-            md_lines.append("> 经全方位高精度巡检，当前目标资产在已授权范围内未发现符合 SRC 中危及以上收录标准的实战漏洞（仅存在常规安全基线合规项）。\n")
+            md_lines.append("> 当前任务未固化可直接提交 SRC 的实战漏洞记录；这不代表系统不存在待复核风险或基线问题，请结合完整巡检报告和复测结果判断。\n")
         else:
             for idx, f in enumerate(src_findings, 1):
                 ev = json.loads(f.get("evidence") or "{}")

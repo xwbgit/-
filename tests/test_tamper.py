@@ -21,6 +21,7 @@ def test_hidden_link_detection():
     assert len(findings) >= 2
     titles = [f["title"] for f in findings]
     assert any("隐蔽暗链" in t for t in titles)
+    assert any("父容器样式 display:none" in t for t in titles)
 
 def test_defacement_detection():
     detector = TamperDetector(auth_domains=["example.gov.cn"])
