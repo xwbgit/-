@@ -144,7 +144,8 @@ graph TD
    - 从 `context.target_url` 或 `context.sub_assets` 获取目标，检测后将结果回写 `context.add_findings`；
    - **无需修改后端 `orchestrator.py`**，递归注册器会自动装载它。
 3. **每次修改后的必做校验**：
-   - 运行终端命令：`python -m pytest -v`；
-   - 确保 **25 个自动化测试用例全部 PASSED**！
-4. **历史源码审计与加固参考**：
-   - 请查阅 [[08-🛡️_本地深度源码审计与缺陷加固记录(Code_Audit)]] 了解系统已知陷阱与防护设计。
+   - 运行终端命令：`python -m pytest --basetemp=./.pytest_temp`；
+   - 确保 **47 个自动化测试用例全部 PASSED/SKIPPED (100% 绿灯)**！
+4. **历史源码审计与版本演进参考**：
+   - 源码缺陷审计：[[08-🛡️_本地深度源码审计与缺陷加固记录(Code_Audit)]]
+   - 新旧版本深度对比：[[09-⚖️_新旧版本架构深度对比与质量审计(Version_Comparison)]]
