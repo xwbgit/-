@@ -17,6 +17,7 @@ data/*.json
 
 # Pytest & Cache
 .pytest_cache/
+.pytest_temp/
 .coverage
 htmlcov/
 
